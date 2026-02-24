@@ -11,12 +11,12 @@ from services.file_service import (
     read_csv,
 
     USERS_PATH,
-    ORDERS_PATH,
+    QUOTES_PATH,
     ASSIGNMENTS_PATH,
     WORKER_QUOTES_PATH,
     FINAL_QUOTES_PATH,
 
-    ORDERS_COLUMNS,
+    QUOTES_COLUMNS,
     ASSIGNMENTS_COLUMNS,
     WORKER_QUOTES_COLUMNS,
     FINAL_QUOTES_COLUMNS,
@@ -24,6 +24,39 @@ from services.file_service import (
 )
 
 st.set_page_config(layout="wide")
+
+
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def render_export_button(label: str, df: pd.DataFrame, filename: str, mime: str = "text/csv"):
+    if df is None or df.empty:
+        st.info(f"No data available for {label.lower()}.")
+        return
+    st.download_button(label, to_csv_bytes(df), filename, mime)
+
+
+def render_import_replace_csv(label: str, expected_columns: list[str], target_path: Path, success_msg: str, key: str):
+    #st.caption(f"Warning: This will replace existing records in `{target_path.name}`.")
+    uploaded_csv = st.file_uploader(label, type=["csv"], key=key)
+    if uploaded_csv is None:
+        return
+
+    try:
+        df = pd.read_csv(uploaded_csv)
+    except Exception as e:
+        st.error(f"Invalid CSV: {e}")
+        return
+
+    for col in expected_columns:
+        if col not in df.columns:
+            df[col] = None
+    df = df[expected_columns]
+
+    df.to_csv(target_path, index=False, quoting=csv.QUOTE_ALL)
+    st.success(success_msg)
+    st.rerun()
 
 if "is_authenticated" not in st.session_state:
     st.session_state.is_authenticated = False
@@ -67,10 +100,10 @@ with col2:
 
 if role == "admin":
     tabs = st.tabs([
-        "Upload Orders",
-        "Master Orders",
-        "Assign Orders",
-        "Worker Submissions",
+        "Upload Quotes",
+        "Master Quotes",
+        "Assign Quotes",
+        "Part Details",
         "Margin & Internal Quote",
         "Export Client Quote"
     ])
@@ -109,10 +142,10 @@ def parse_excel(file) -> pd.DataFrame:
 if role == "admin":
 
     # -------------------------
-    # TAB 1 - Upload Orders
+    # TAB 1 - Upload Quotes
     # -------------------------
     with tabs[0]:
-        st.header("Upload Orders")
+        st.header("Upload Quotes")
 
         uploaded_file = st.file_uploader(
             "Upload Excel File",
@@ -120,6 +153,7 @@ if role == "admin":
         )
 
         parsed_df = pd.DataFrame(columns=[
+            "QUOTE_ID",
             "SL NO",
             "DATE",
             "CUSTOMER NAME",
@@ -138,6 +172,7 @@ if role == "admin":
             except ValueError as e:
                 st.error(str(e))
                 parsed_df = pd.DataFrame(columns=[
+                    "QUOTE_ID",
                     "SL NO",
                     "DATE",
                     "CUSTOMER NAME",
@@ -161,6 +196,13 @@ if role == "admin":
                     subset=["PART NO", "DESCRIPTION", "QTY"]
                 )
 
+                if "QUOTE_ID" not in parsed_df.columns:
+                    parsed_df.insert(
+                        0,
+                        "QUOTE_ID",
+                        [str(uuid.uuid4().hex[:8]) for _ in range(len(parsed_df))]
+                    )
+
             if not parsed_df.empty:
                 st.success(f"{len(parsed_df)} rows parsed successfully")
 
@@ -170,12 +212,13 @@ if role == "admin":
             st.download_button(
                 "Download Parsed Data",
                 export_csv,
-                "parsed_orders.csv",
+                "parsed_quotes.csv",
                 "text/csv"
             )
 
-        order_table = st.data_editor(
+        quote_table = st.data_editor(
             parsed_df if uploaded_file else pd.DataFrame(columns=[
+                "QUOTE_ID",
                 "SL NO",
                 "DATE",
                 "CUSTOMER NAME",
@@ -188,133 +231,151 @@ if role == "admin":
                 "DUE DATE"
             ]),
             num_rows="dynamic",
-            key="order_editor"
+            key="quote_editor"
         )
 
-        if not order_table.empty:
-            current_export_csv = order_table.to_csv(index=False).encode("utf-8")
+        if not quote_table.empty:
+            current_export_csv = quote_table.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "Export Current Table",
                 current_export_csv,
-                "current_orders.csv",
+                "current_quotes.csv",
                 "text/csv"
             )
 
-        if st.button("Save Orders"):
+        if st.button("Save Quotes"):
 
-            if order_table.empty:
+            if quote_table.empty:
                 st.warning("No data to save")
             else:
-                order_table = order_table.copy()
+                quote_table = quote_table.copy()
 
                 # Validate QTY
-                order_table["QTY"] = pd.to_numeric(
-                    order_table["QTY"], errors="coerce"
+                quote_table["QTY"] = pd.to_numeric(
+                    quote_table["QTY"], errors="coerce"
                 )
 
-                order_table["DATE"] = pd.to_datetime(
-                    order_table["DATE"],
+                quote_table["DATE"] = pd.to_datetime(
+                    quote_table["DATE"],
                     errors="coerce"
                 )
-                order_table["DUE DATE"] = pd.to_datetime(
-                    order_table["DUE DATE"],
+                quote_table["DUE DATE"] = pd.to_datetime(
+                    quote_table["DUE DATE"],
                     errors="coerce"
                 )
-                order_table["COND"] = order_table["COND"].astype("string").str.upper()
+                quote_table["COND"] = quote_table["COND"].astype("string").str.upper()
 
-                order_table = order_table.dropna(
-                    subset=["PART NO", "QTY", "DATE", "DUE DATE"]
+                missing_date_rows = int(quote_table["DATE"].isna().sum())
+                if missing_date_rows > 0:
+                    st.warning(
+                        f"{missing_date_rows} row(s) have missing/invalid DATE and will be skipped."
+                    )
+
+                quote_table = quote_table.dropna(
+                    subset=["PART NO", "QTY", "DATE"]
                 )
 
-                if order_table.empty:
+                if quote_table.empty:
                     st.error("Invalid data")
                 else:
                     save_blocked = False
-                    order_table["Customer ref NO"] = order_table["Customer ref NO"].astype(str).str.strip()
-                    order_table = order_table[order_table["Customer ref NO"] != ""]
-                    if order_table.empty:
+                    quote_table["Customer ref NO"] = (
+                        quote_table["Customer ref NO"]
+                        .astype("string")
+                        .str.strip()
+                        .fillna("")
+                    )
+                    quote_table = quote_table[quote_table["Customer ref NO"] != ""]
+                    if quote_table.empty:
                         st.error("Customer ref NO is required.")
                         save_blocked = True
 
-                    batch_refs = order_table["Customer ref NO"].dropna().unique().tolist()
-                    if not save_blocked and len(batch_refs) > 1:
-                        st.error("Only one Customer ref NO is allowed per upload/save batch.")
-                        save_blocked = True
-
-                    existing = read_csv(ORDERS_PATH)
-                    existing_refs = (
-                        existing["Customer ref NO"].astype(str).str.strip().tolist()
-                        if not existing.empty and "Customer ref NO" in existing.columns
-                        else []
-                    )
-                    duplicate_refs = [r for r in batch_refs if r in existing_refs]
-                    if not save_blocked and duplicate_refs:
-                        st.error(
-                            f"Customer Ref No already exists: {', '.join(duplicate_refs)}. "
-                            "Use a unique Customer ref NO for each RFQ batch."
-                        )
-                        save_blocked = True
+                    existing = read_csv(QUOTES_PATH)
 
                     if not save_blocked:
-                        order_table["DATE"] = order_table["DATE"].dt.strftime("%Y-%m-%d")
-                        order_table["DUE DATE"] = order_table["DUE DATE"].dt.strftime("%Y-%m-%d")
+                        quote_table["DATE"] = quote_table["DATE"].dt.strftime("%Y-%m-%d")
+                        quote_table["DUE DATE"] = quote_table["DUE DATE"].dt.strftime("%Y-%m-%d")
 
-                        order_table["ORDER_ID"] = [
-                            str(uuid.uuid4().hex[:8])
-                            for _ in range(len(order_table))
+                        if "QUOTE_ID" not in quote_table.columns:
+                            quote_table["QUOTE_ID"] = None
+                        quote_table["QUOTE_ID"] = quote_table["QUOTE_ID"].astype("string").str.strip()
+                        missing_quote_ids = quote_table["QUOTE_ID"].isna() | (quote_table["QUOTE_ID"] == "")
+                        quote_table.loc[missing_quote_ids, "QUOTE_ID"] = [
+                            str(uuid.uuid4().hex[:8]) for _ in range(int(missing_quote_ids.sum()))
                         ]
 
-                        order_table["STATUS"] = "UPLOADED"
-                        order_table["CREATED_DATE"] = datetime.now().strftime("%Y-%m-%d")
+                        quote_table["STATUS"] = "UPLOADED"
+                        quote_table["CREATED_DATE"] = datetime.now().strftime("%Y-%m-%d")
 
                         # Enforce Schema & Types
-                        for col in ORDERS_COLUMNS:
-                            if col not in order_table.columns:
-                                order_table[col] = None
+                        for col in QUOTES_COLUMNS:
+                            if col not in quote_table.columns:
+                                quote_table[col] = None
                         
-                        order_table["ORDER_ID"] = order_table["ORDER_ID"].astype(str)
+                        quote_table["QUOTE_ID"] = quote_table["QUOTE_ID"].astype(str)
 
-                        order_table = order_table[ORDERS_COLUMNS]
+                        quote_table = quote_table[QUOTES_COLUMNS]
 
                         # Safe Rewrite (No append mode)
-                        final_df = pd.concat([existing, order_table])
+                        final_df = pd.concat([existing, quote_table])
 
                         final_df.to_csv(
-                            ORDERS_PATH,
+                            QUOTES_PATH,
                             index=False,
                             quoting=csv.QUOTE_ALL
                         )
 
-                        st.success(f"Saved {len(order_table)} orders")
+                        st.success(f"Saved {len(quote_table)} quotes")
     # ------------------------
-    # TAB 2 - Master Orders
+    # TAB 2 - Master Quotes
     # -------------------------
     with tabs[1]:
-        st.header("Master Orders")
+        st.header("Master Quotes")
 
-        orders_df = read_csv(ORDERS_PATH)
+        st.subheader("Data Transfer")
+        render_import_replace_csv(
+            "Import Quotes CSV",
+            QUOTES_COLUMNS,
+            QUOTES_PATH,
+            "Quotes CSV replaced successfully.",
+            key="import_quotes_master"
+        )
 
-        if not orders_df.empty:
-            st.dataframe(orders_df)
+        quotes_df = read_csv(QUOTES_PATH)
+
+        if not quotes_df.empty:
+            st.dataframe(quotes_df)
+            render_export_button("Export Quotes CSV", quotes_df, "quotes.csv")
         else:
-            st.info("No orders uploaded yet.")
+            st.info("No quotes uploaded yet.")
 
     # -----------------------
-    # TAB 3 - Assign Orders
+    # TAB 3 - Assign Quotes
     # -----------------------
     with tabs[2]:
-        st.header("Assign Orders to Workers")
-        orders_df = read_csv(ORDERS_PATH)
+        st.header("Assign Quotes to Workers")
+        st.subheader("Data Transfer")
+        render_import_replace_csv(
+            "Import Assignments CSV",
+            ASSIGNMENTS_COLUMNS,
+            ASSIGNMENTS_PATH,
+            "Assignments CSV replaced successfully.",
+            key="import_assignments_assign_tab"
+        )
+        assignments_df = read_csv(ASSIGNMENTS_PATH)
+        render_export_button("Export Assignments CSV", assignments_df, "assignments.csv")
 
-        if orders_df.empty:
-            st.info("No orders available.")
+        quotes_df = read_csv(QUOTES_PATH)
+
+        if quotes_df.empty:
+            st.info("No quotes available.")
         else:
-            pending_orders = orders_df[
-                orders_df["STATUS"].astype(str).str.upper() == "UPLOADED"
+            pending_quotes = quotes_df[
+                quotes_df["STATUS"].astype(str).str.upper() == "UPLOADED"
             ]
 
-            if pending_orders.empty:
-                st.info("No unassigned orders.")
+            if pending_quotes.empty:
+                st.info("No unassigned quotes.")
             else:
                 worker_df = users_df[users_df["ROLE"] == "worker"].copy()
                 worker_list = worker_df["USERNAME"].tolist()
@@ -324,7 +385,7 @@ if role == "admin":
                 else:
                     h1, h2, h3, h4, h5, h6, h7 = st.columns([1.2, 2, 3, 1, 1.2, 2, 1])
                     with h1:
-                        st.markdown("**ORDER_ID**")
+                        st.markdown("**QUOTE_ID**")
                     with h2:
                         st.markdown("**PART NO**")
                     with h3:
@@ -338,11 +399,11 @@ if role == "admin":
                     with h7:
                         st.markdown("**Action**")
 
-                    for idx, row in pending_orders.iterrows():
+                    for idx, row in pending_quotes.iterrows():
                         col1, col2, col3, col4, col5, col6, col7 = st.columns([1.2, 2, 3, 1, 1.2, 2, 1])
 
                         with col1:
-                            st.write(row["ORDER_ID"])
+                            st.write(row["QUOTE_ID"])
                         with col2:
                             st.write(row["PART NO"])
                         with col3:
@@ -365,7 +426,7 @@ if role == "admin":
                                     duplicate = pd.DataFrame()
                                 else:
                                     duplicate = existing_assignments[
-                                        (existing_assignments["ORDER_ID"].astype(str) == str(row["ORDER_ID"])) &
+                                        (existing_assignments["QUOTE_ID"].astype(str) == str(row["QUOTE_ID"])) &
                                         (existing_assignments["PART NO"].astype(str) == str(row["PART NO"]))
                                     ]
 
@@ -377,7 +438,7 @@ if role == "admin":
                                     ]["USER_ID"].values[0]
 
                                     assignment_data = {
-                                        "ORDER_ID": str(row["ORDER_ID"]),
+                                        "QUOTE_ID": str(row["QUOTE_ID"]),
                                         "PART NO": row["PART NO"],
                                         "ASSIGNED_TO": str(worker_id),
                                         "ASSIGNED_DATE": datetime.now().strftime("%Y-%m-%d")
@@ -389,14 +450,14 @@ if role == "admin":
                                         ASSIGNMENTS_COLUMNS
                                     )
 
-                                    orders_df.loc[
-                                        (orders_df["ORDER_ID"].astype(str) == str(row["ORDER_ID"])) &
-                                        (orders_df["PART NO"].astype(str) == str(row["PART NO"])),
+                                    quotes_df.loc[
+                                        (quotes_df["QUOTE_ID"].astype(str) == str(row["QUOTE_ID"])) &
+                                        (quotes_df["PART NO"].astype(str) == str(row["PART NO"])),
                                         "STATUS"
                                     ] = "ASSIGNED"
 
-                                    orders_df.to_csv(
-                                        ORDERS_PATH,
+                                    quotes_df.to_csv(
+                                        QUOTES_PATH,
                                         index=False,
                                         quoting=csv.QUOTE_ALL
                                     )
@@ -407,31 +468,30 @@ if role == "admin":
             st.divider()
             st.subheader("Already Assigned")
 
-            assignments_df = read_csv(ASSIGNMENTS_PATH)
             if assignments_df.empty:
                 st.info("No assigned rows yet.")
             else:
-                assigned_rows = orders_df[
-                    orders_df["STATUS"].astype(str).str.upper() == "ASSIGNED"
-                ][["ORDER_ID", "PART NO", "DESCRIPTION", "QTY", "STATUS"]].copy()
+                assigned_rows = quotes_df[
+                    quotes_df["STATUS"].astype(str).str.upper() == "ASSIGNED"
+                ][["QUOTE_ID", "PART NO", "DESCRIPTION", "QTY", "STATUS"]].copy()
 
                 if assigned_rows.empty:
                     st.info("No assigned rows yet.")
                 else:
                     assignments_view = assignments_df.copy()
-                    assignments_view["ORDER_ID"] = assignments_view["ORDER_ID"].astype(str)
+                    assignments_view["QUOTE_ID"] = assignments_view["QUOTE_ID"].astype(str)
                     assignments_view["PART NO"] = assignments_view["PART NO"].astype(str)
                     assignments_view["ASSIGNED_TO"] = assignments_view["ASSIGNED_TO"].astype(str)
 
                     users_lookup = users_df[["USER_ID", "USERNAME"]].copy()
                     users_lookup["USER_ID"] = users_lookup["USER_ID"].astype(str)
 
-                    assigned_rows["ORDER_ID"] = assigned_rows["ORDER_ID"].astype(str)
+                    assigned_rows["QUOTE_ID"] = assigned_rows["QUOTE_ID"].astype(str)
                     assigned_rows["PART NO"] = assigned_rows["PART NO"].astype(str)
 
                     assigned_display = assigned_rows.merge(
-                        assignments_view[["ORDER_ID", "PART NO", "ASSIGNED_TO", "ASSIGNED_DATE"]],
-                        on=["ORDER_ID", "PART NO"],
+                        assignments_view[["QUOTE_ID", "PART NO", "ASSIGNED_TO", "ASSIGNED_DATE"]],
+                        on=["QUOTE_ID", "PART NO"],
                         how="left"
                     ).merge(
                         users_lookup,
@@ -443,7 +503,7 @@ if role == "admin":
                     assigned_display = assigned_display.rename(
                         columns={"USERNAME": "ASSIGNED_TO_USER"}
                     )[[
-                        "ORDER_ID",
+                        "QUOTE_ID",
                         "PART NO",
                         "DESCRIPTION",
                         "QTY",
@@ -455,35 +515,54 @@ if role == "admin":
                     st.dataframe(assigned_display, use_container_width=True)
 
     # -----------------------
-    # TAB 4 - Worker Submissions
+    # TAB 4 - Part Details
     # -----------------------
     with tabs[3]:
-        st.header("Worker Submissions")
+        st.header("Part Details")
+        st.subheader("Data Transfer")
+        render_import_replace_csv(
+            "Import Part Details CSV",
+            WORKER_QUOTES_COLUMNS,
+            WORKER_QUOTES_PATH,
+            "Part details CSV replaced successfully.",
+            key="import_part_details_admin"
+        )
+
         submissions_df = read_csv(WORKER_QUOTES_PATH)
         if not submissions_df.empty:
             st.dataframe(submissions_df, use_container_width=True)
+            render_export_button("Export Part Details CSV", submissions_df, "part_details.csv")
         else:
-            st.info("No submissions from workers yet.")
+            st.info("No part details yet.")
 
     # -----------------------
     # TAB 5 - Margin & Internal Quote
     # -----------------------
     with tabs[4]:
         st.header("Margin & Internal Quote")
-        worker_df = read_csv(WORKER_QUOTES_PATH)
-        orders_df = read_csv(ORDERS_PATH)
+        st.subheader("Data Transfer")
+        render_import_replace_csv(
+            "Import Final Quotes CSV",
+            FINAL_QUOTES_COLUMNS,
+            FINAL_QUOTES_PATH,
+            "Final quotes CSV replaced successfully.",
+            key="import_final_quotes_margin"
+        )
 
-        if orders_df.empty:
-            st.info("No orders available.")
+        worker_df = read_csv(WORKER_QUOTES_PATH)
+        quotes_df = read_csv(QUOTES_PATH)
+
+        if quotes_df.empty:
+            st.info("No quotes available.")
         elif worker_df.empty:
-            st.info("No worker submissions to process.")
+            st.info("No part details to process.")
         else:
-            for df in [worker_df, orders_df]:
-                df["ORDER_ID"] = df["ORDER_ID"].astype(str).str.strip()
+            for df in [worker_df, quotes_df]:
+                df["QUOTE_ID"] = df["QUOTE_ID"].astype(str).str.strip()
                 df["PART NO"] = df["PART NO"].astype(str).str.strip()
 
             customer_refs = (
-                orders_df["Customer ref NO"]
+                quotes_df["Customer ref NO"]
                 .dropna()
                 .astype(str)
                 .str.strip()
@@ -492,77 +571,167 @@ if role == "admin":
             )
 
             if not customer_refs:
-                st.info("No customer references found in orders.")
+                st.info("No customer references found in quotes.")
             else:
                 sel_ref = st.selectbox("Select Customer Ref", customer_refs, key="margin_customer_ref")
-                customer_orders = orders_df[
-                    orders_df["Customer ref NO"].astype(str).str.strip() == str(sel_ref).strip()
+                customer_quotes = quotes_df[
+                    quotes_df["Customer ref NO"].astype(str).str.strip() == str(sel_ref).strip()
                 ].copy()
 
                 subs_for_customer = worker_df.merge(
-                    customer_orders[["ORDER_ID", "PART NO"]].drop_duplicates(),
-                    on=["ORDER_ID", "PART NO"],
+                    customer_quotes[["QUOTE_ID", "PART NO"]].drop_duplicates(),
+                    on=["QUOTE_ID", "PART NO"],
                     how="inner"
                 )
 
                 final_quotes_df = read_csv(FINAL_QUOTES_PATH)
 
                 if subs_for_customer.empty:
-                    st.info("No worker submissions found for this customer reference.")
+                    st.info("No part details found for this customer reference.")
                 else:
-                    for idx, row in subs_for_customer.iterrows():
-                        with st.expander(f"Part: {row['PART NO']} (Supplier: {row['SUPPLIER']})"):
-                            # Keep compatibility with older worker quote schemas.
-                            if "PRICE" in subs_for_customer.columns:
-                                cost_col = "PRICE"
-                            elif "COST_PRICE_EA" in subs_for_customer.columns:
-                                cost_col = "COST_PRICE_EA"
-                            else:
-                                cost_col = "COST"
-                            cost = pd.to_numeric(row.get(cost_col, 0), errors="coerce")
-                            if pd.isna(cost):
-                                cost = 0.0
-                            st.write(f"Supplier Price: {cost}")
+                    if "PRICE" in subs_for_customer.columns:
+                        cost_col = "PRICE"
+                    elif "COST_PRICE_EA" in subs_for_customer.columns:
+                        cost_col = "COST_PRICE_EA"
+                    else:
+                        cost_col = "COST"
 
-                            qty_row = customer_orders[
-                                (customer_orders["ORDER_ID"] == str(row["ORDER_ID"]).strip()) &
-                                (customer_orders["PART NO"] == str(row["PART NO"]).strip())
+                    part_base = customer_quotes[
+                        ["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "QTY", "DUE DATE"]
+                    ].drop_duplicates()
+                    supplier_base = subs_for_customer.copy()
+                    supplier_base["PRICE"] = pd.to_numeric(supplier_base[cost_col], errors="coerce")
+                    supplier_base = supplier_base.sort_values(by=["QUOTE_ID", "PART NO", "PRICE"], na_position="last")
+                    supplier_base = supplier_base.drop_duplicates(subset=["QUOTE_ID", "PART NO"], keep="first")
+                    supplier_base = supplier_base[["QUOTE_ID", "PART NO", "SUPPLIER", "PRICE"]]
+
+                    margin_grid = part_base.merge(
+                        supplier_base,
+                        on=["QUOTE_ID", "PART NO"],
+                        how="left"
+                    )
+
+                    if not final_quotes_df.empty:
+                        final_existing = final_quotes_df[[
+                            "QUOTE_ID",
+                            "PART NO",
+                            "MARGIN_PERCENT"
+                        ]].copy()
+                        final_existing["QUOTE_ID"] = final_existing["QUOTE_ID"].astype(str).str.strip()
+                        final_existing["PART NO"] = final_existing["PART NO"].astype(str).str.strip()
+                        margin_grid = margin_grid.merge(
+                            final_existing,
+                            on=["QUOTE_ID", "PART NO"],
+                            how="left"
+                        )
+                    else:
+                        margin_grid["MARGIN_PERCENT"] = None
+
+                    margin_grid["PRICE"] = pd.to_numeric(margin_grid["PRICE"], errors="coerce").fillna(0.0)
+                    margin_grid["QTY"] = pd.to_numeric(margin_grid["QTY"], errors="coerce").fillna(1.0)
+                    margin_grid["MARGIN_PERCENT"] = pd.to_numeric(margin_grid["MARGIN_PERCENT"], errors="coerce").fillna(15.0)
+                    margin_grid["FINAL_UNIT_PRICE"] = margin_grid["PRICE"] * (1 + margin_grid["MARGIN_PERCENT"] / 100)
+                    margin_grid["FINAL_TOTAL"] = margin_grid["FINAL_UNIT_PRICE"] * margin_grid["QTY"]
+
+                    edit_cols = [
+                        "QUOTE_ID",
+                        "Customer ref NO",
+                        "PART NO",
+                        "DESCRIPTION",
+                        "QTY",
+                        "SUPPLIER",
+                        "PRICE",
+                        "MARGIN_PERCENT",
+                        "FINAL_UNIT_PRICE",
+                        "FINAL_TOTAL",
+                        "DUE DATE"
+                    ]
+                    st.caption("Set margin for each part in the table below.")
+                    edited_margin_grid = st.data_editor(
+                        margin_grid[edit_cols],
+                        num_rows="fixed",
+                        key="margin_grid_editor",
+                        hide_index=True,
+                        disabled=[
+                            "QUOTE_ID",
+                            "Customer ref NO",
+                            "PART NO",
+                            "DESCRIPTION",
+                            "QTY",
+                            "SUPPLIER",
+                            "PRICE",
+                            "FINAL_UNIT_PRICE",
+                            "FINAL_TOTAL",
+                            "DUE DATE"
+                        ]
+                    )
+
+                    edited_margin_grid["PRICE"] = pd.to_numeric(edited_margin_grid["PRICE"], errors="coerce").fillna(0.0)
+                    edited_margin_grid["QTY"] = pd.to_numeric(edited_margin_grid["QTY"], errors="coerce").fillna(1.0)
+                    edited_margin_grid["MARGIN_PERCENT"] = pd.to_numeric(
+                        edited_margin_grid["MARGIN_PERCENT"],
+                        errors="coerce"
+                    ).fillna(0.0)
+                    edited_margin_grid["FINAL_UNIT_PRICE"] = edited_margin_grid["PRICE"] * (
+                        1 + edited_margin_grid["MARGIN_PERCENT"] / 100
+                    )
+                    edited_margin_grid["FINAL_TOTAL"] = (
+                        edited_margin_grid["FINAL_UNIT_PRICE"] * edited_margin_grid["QTY"]
+                    )
+
+                    st.dataframe(
+                        edited_margin_grid[
+                            [
+                                "QUOTE_ID",
+                                "PART NO",
+                                "SUPPLIER",
+                                "PRICE",
+                                "MARGIN_PERCENT",
+                                "FINAL_UNIT_PRICE",
+                                "FINAL_TOTAL"
                             ]
-                            qty = qty_row["QTY"].values[0] if not qty_row.empty else 1
+                        ],
+                        use_container_width=True
+                    )
 
-                            margin_percent = st.number_input(
-                                f"Margin %",
-                                min_value=0.0,
-                                value=15.0,
-                                key=f"margin_{idx}"
+                    if st.button("Save/Update Final Quotes", key="save_margin_grid"):
+                        final_quotes_df = read_csv(FINAL_QUOTES_PATH)
+                        if final_quotes_df.empty:
+                            final_quotes_df = pd.DataFrame(columns=FINAL_QUOTES_COLUMNS)
+                        else:
+                            final_quotes_df["QUOTE_ID"] = final_quotes_df["QUOTE_ID"].astype(str).str.strip()
+                            final_quotes_df["PART NO"] = final_quotes_df["PART NO"].astype(str).str.strip()
+
+                        for _, row in edited_margin_grid.iterrows():
+                            record = {
+                                "QUOTE_ID": str(row["QUOTE_ID"]).strip(),
+                                "PART NO": str(row["PART NO"]).strip(),
+                                "PRICE": float(row["PRICE"]),
+                                "MARGIN_PERCENT": float(row["MARGIN_PERCENT"]),
+                                "FINAL_UNIT_PRICE": float(row["FINAL_UNIT_PRICE"]),
+                                "FINAL_TOTAL": float(row["FINAL_TOTAL"]),
+                                "GENERATED_DATE": datetime.now().strftime("%Y-%m-%d")
+                            }
+                            mask = (
+                                (final_quotes_df["QUOTE_ID"].astype(str).str.strip() == record["QUOTE_ID"]) &
+                                (final_quotes_df["PART NO"].astype(str).str.strip() == record["PART NO"])
                             )
-                            final_unit = cost * (1 + margin_percent / 100)
-                            final_total = final_unit * qty
+                            if mask.any():
+                                for col, val in record.items():
+                                    final_quotes_df.loc[mask, col] = val
+                            else:
+                                final_quotes_df = pd.concat(
+                                    [final_quotes_df, pd.DataFrame([record])],
+                                    ignore_index=True
+                                )
 
-                            st.write(f"Final Unit Price: {final_unit:.2f}")
-                            st.write(f"Final Total: {final_total:.2f}")
-
-                            if st.button("Save Final Quote", key=f"save_{idx}"):
-                                existing_final = final_quotes_df[
-                                    (final_quotes_df["ORDER_ID"].astype(str).str.strip() == str(row["ORDER_ID"]).strip()) &
-                                    (final_quotes_df["PART NO"].astype(str).str.strip() == str(row["PART NO"]).strip())
-                                ] if not final_quotes_df.empty else pd.DataFrame()
-
-                                if not existing_final.empty:
-                                    st.warning("Final quote already exists for this part.")
-                                else:
-                                    final_quote = {
-                                        "ORDER_ID": str(row["ORDER_ID"]).strip(),
-                                        "PART NO": str(row["PART NO"]).strip(),
-                                        "PRICE": cost,
-                                        "MARGIN_PERCENT": margin_percent,
-                                        "FINAL_UNIT_PRICE": final_unit,
-                                        "FINAL_TOTAL": final_total,
-                                        "GENERATED_DATE": datetime.now().strftime("%Y-%m-%d")
-                                    }
-                                    append_to_csv(FINAL_QUOTES_PATH, final_quote, FINAL_QUOTES_COLUMNS)
-                                    st.success(f"Saved quote for {row['PART NO']}")
-                                    st.rerun()
+                        for col in FINAL_QUOTES_COLUMNS:
+                            if col not in final_quotes_df.columns:
+                                final_quotes_df[col] = None
+                        final_quotes_df = final_quotes_df[FINAL_QUOTES_COLUMNS]
+                        final_quotes_df.to_csv(FINAL_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                        st.success("Final quotes saved/updated successfully.")
+                        st.rerun()
 
                 st.divider()
                 st.subheader("Internal Quote Summary")
@@ -571,17 +740,17 @@ if role == "admin":
                 if final_quotes_df.empty:
                     st.info("No final quotes generated yet.")
                 else:
-                    final_quotes_df["ORDER_ID"] = final_quotes_df["ORDER_ID"].astype(str).str.strip()
+                    final_quotes_df["QUOTE_ID"] = final_quotes_df["QUOTE_ID"].astype(str).str.strip()
                     final_quotes_df["PART NO"] = final_quotes_df["PART NO"].astype(str).str.strip()
 
                     merged_df = final_quotes_df.merge(
                         worker_df,
-                        on=["ORDER_ID", "PART NO"],
+                        on=["QUOTE_ID", "PART NO"],
                         how="left",
                         suffixes=("_final", "_worker")
                     ).merge(
-                        orders_df,
-                        on=["ORDER_ID", "PART NO"],
+                        quotes_df,
+                        on=["QUOTE_ID", "PART NO"],
                         how="left"
                     )
 
@@ -641,26 +810,35 @@ if role == "admin":
     # -----------------------
     with tabs[5]:
         st.header("Export Client Quote")
+        st.subheader("Data Transfer")
+        render_import_replace_csv(
+            "Import Final Quotes CSV",
+            FINAL_QUOTES_COLUMNS,
+            FINAL_QUOTES_PATH,
+            "Final quotes CSV replaced successfully.",
+            key="import_final_quotes_client_export"
+        )
+
         final_df = read_csv(FINAL_QUOTES_PATH)
         worker_df = read_csv(WORKER_QUOTES_PATH)
-        orders_df = read_csv(ORDERS_PATH)
+        quotes_df = read_csv(QUOTES_PATH)
 
         if final_df.empty:
             st.info("No final quotes generated yet.")
         else:
             # Normalize keys for reliable joins.
-            for df in [final_df, worker_df, orders_df]:
-                df["ORDER_ID"] = df["ORDER_ID"].astype(str).str.strip()
+            for df in [final_df, worker_df, quotes_df]:
+                df["QUOTE_ID"] = df["QUOTE_ID"].astype(str).str.strip()
                 df["PART NO"] = df["PART NO"].astype(str).str.strip()
 
             merged_df = final_df.merge(
                 worker_df,
-                on=["ORDER_ID", "PART NO"],
+                on=["QUOTE_ID", "PART NO"],
                 how="left"
             )
             merged_df = merged_df.merge(
-                orders_df,
-                on=["ORDER_ID", "PART NO"],
+                quotes_df,
+                on=["QUOTE_ID", "PART NO"],
                 how="left"
             )
 
@@ -717,22 +895,22 @@ else:
     with tabs[0]:
         st.header("My Assigned Parts")
         assignments_df = read_csv(ASSIGNMENTS_PATH)
-        orders_df = read_csv(ORDERS_PATH)
+        quotes_df = read_csv(QUOTES_PATH)
 
         # Normalize join keys to avoid dtype/whitespace mismatches.
-        assignments_df["ORDER_ID"] = assignments_df["ORDER_ID"].astype(str).str.strip()
+        assignments_df["QUOTE_ID"] = assignments_df["QUOTE_ID"].astype(str).str.strip()
         assignments_df["PART NO"] = assignments_df["PART NO"].astype(str).str.strip()
         assignments_df["ASSIGNED_TO"] = assignments_df["ASSIGNED_TO"].astype(str).str.strip()
-        orders_df["ORDER_ID"] = orders_df["ORDER_ID"].astype(str).str.strip()
-        orders_df["PART NO"] = orders_df["PART NO"].astype(str).str.strip()
+        quotes_df["QUOTE_ID"] = quotes_df["QUOTE_ID"].astype(str).str.strip()
+        quotes_df["PART NO"] = quotes_df["PART NO"].astype(str).str.strip()
 
         my_assignments = assignments_df[
             assignments_df["ASSIGNED_TO"].astype(str) == str(user_id)
         ]
 
         my_tasks = my_assignments.merge(
-            orders_df,
-            on=["ORDER_ID", "PART NO"],
+            quotes_df,
+            on=["QUOTE_ID", "PART NO"],
             how="left"
         )
         if my_tasks.empty:
@@ -742,6 +920,7 @@ else:
                 my_tasks["MEASURE_UNIT"] = "EA"
 
             display_columns = [
+                "QUOTE_ID",
                 "Customer ref NO",
                 "PART NO",
                 "DESCRIPTION",
@@ -749,18 +928,31 @@ else:
                 "MEASURE_UNIT",
                 "DUE DATE"
             ]
-            st.dataframe(my_tasks[display_columns], use_container_width=True)
+            assigned_parts_view = my_tasks[display_columns]
+            st.dataframe(assigned_parts_view, use_container_width=True)
+            render_export_button(
+                "Export Assigned Parts CSV",
+                assigned_parts_view,
+                f"assigned_parts_{username}.csv"
+            )
 
     with tabs[1]:
         st.header("Submit Supplier Info")
+        if not my_tasks.empty:
+            pending_tasks_export = my_tasks[["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "QTY", "DUE DATE"]].copy()
+            render_export_button(
+                "Export My Pending Assigned Tasks CSV",
+                pending_tasks_export,
+                f"my_pending_tasks_{username}.csv"
+            )
         
         if not my_tasks.empty:
-            # We need ORDER_ID + PART NO to identify the task uniquely
-            task_options = my_tasks.apply(lambda x: f"{x['ORDER_ID']} - {x['PART NO']}", axis=1).tolist()
+            # We need QUOTE_ID + PART NO to identify the task uniquely
+            task_options = my_tasks.apply(lambda x: f"{x['QUOTE_ID']} - {x['PART NO']}", axis=1).tolist()
             selected_task = st.selectbox("Select Assigned Task", task_options)
             
             # Extract ID and Part
-            sel_order_id = selected_task.split(" - ")[0]
+            sel_quote_id = selected_task.split(" - ")[0]
             sel_part_no = selected_task.split(" - ")[1]
             
             with st.form("submission_form"):
@@ -785,7 +977,7 @@ else:
                         st.error("Supplier and Cost Price are required.")
                     else:
                         new_submission = {
-                            "ORDER_ID": sel_order_id,
+                            "QUOTE_ID": sel_quote_id,
                             "PART NO": sel_part_no,
                             "SUPPLIER": supplier,
                             "PRICE": cost_price,
@@ -808,15 +1000,15 @@ else:
         st.header("My Submitted Quotes")
 
         worker_df = read_csv(WORKER_QUOTES_PATH)
-        orders_df = read_csv(ORDERS_PATH)
+        quotes_df = read_csv(QUOTES_PATH)
 
         if worker_df.empty:
             st.info("No submissions yet.")
         else:
-            worker_df["ORDER_ID"] = worker_df["ORDER_ID"].astype(str).str.strip()
+            worker_df["QUOTE_ID"] = worker_df["QUOTE_ID"].astype(str).str.strip()
             worker_df["PART NO"] = worker_df["PART NO"].astype(str).str.strip()
-            orders_df["ORDER_ID"] = orders_df["ORDER_ID"].astype(str).str.strip()
-            orders_df["PART NO"] = orders_df["PART NO"].astype(str).str.strip()
+            quotes_df["QUOTE_ID"] = quotes_df["QUOTE_ID"].astype(str).str.strip()
+            quotes_df["PART NO"] = quotes_df["PART NO"].astype(str).str.strip()
 
             my_quotes = worker_df[
                 worker_df["WORKER_ID"].astype(str).str.strip() == str(user_id)
@@ -826,8 +1018,8 @@ else:
                 st.info("No submissions yet.")
             else:
                 merged = my_quotes.merge(
-                    orders_df,
-                    on=["ORDER_ID", "PART NO"],
+                    quotes_df,
+                    on=["QUOTE_ID", "PART NO"],
                     how="left"
                 )
 
@@ -850,3 +1042,8 @@ else:
                 })
 
                 st.dataframe(my_submissions_view, use_container_width=True)
+                render_export_button(
+                    "Export My Submissions CSV",
+                    my_submissions_view,
+                    f"my_submissions_{username}.csv"
+                )
