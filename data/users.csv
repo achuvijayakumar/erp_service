@@ -1,0 +1,6 @@
+USER_ID,USERNAME,ROLE
+1,admin,admin
+2,user1,worker
+3,user2,worker
+4,user3,worker
+5,user4,worker
