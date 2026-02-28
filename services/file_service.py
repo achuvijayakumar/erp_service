@@ -1,13 +1,22 @@
 import csv
+import os
 from pathlib import Path
 
 import pandas as pd
-from pandas.errors import EmptyDataError
+from pandas.errors import EmptyDataError, ParserError
 
 
-DATA_DIR = Path(__file__).parent.parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent.parent
+erp_data_dir = os.getenv("ERP_DATA_DIR")
+if erp_data_dir:
+    configured_data_dir = Path(erp_data_dir).expanduser()
+    DATA_DIR = configured_data_dir if configured_data_dir.is_absolute() else (BASE_DIR / configured_data_dir).resolve()
+else:
+    DATA_DIR = (BASE_DIR / "data").resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+CERTIFICATE_DIR = DATA_DIR / "certificates"
+CERTIFICATE_DIR.mkdir(parents=True, exist_ok=True)
 
 USERS_PATH = DATA_DIR / "users.csv"
 QUOTES_PATH = DATA_DIR / "quotes.csv"
@@ -44,6 +53,7 @@ ASSIGNMENTS_COLUMNS = [
     "PART NO",
     "ASSIGNED_TO",
     "ASSIGNED_DATE",
+    "WORKER_DUE_DATE",
 ]
 WORKER_QUOTES_COLUMNS = [
     "QUOTE_ID",
@@ -53,7 +63,8 @@ WORKER_QUOTES_COLUMNS = [
     "COND_AVAILABLE",
     "QTY_AVAILABLE",
     "LT",
-    "CERTIFICATE",
+    "CERTIFICATE_AVAILABLE",
+    "CERTIFICATE_FILE",
     "REMARKS",
     "WORKER_ID",
     "SUBMITTED_DATE",
@@ -61,6 +72,7 @@ WORKER_QUOTES_COLUMNS = [
 FINAL_QUOTES_COLUMNS = [
     "QUOTE_ID",
     "PART NO",
+    "SUPPLIER",
     "PRICE",
     "MARGIN_PERCENT",
     "FINAL_UNIT_PRICE",
@@ -77,14 +89,22 @@ def initialize_file(path: Path, columns: list[str]):
         pd.DataFrame(columns=columns).to_csv(path, index=False)
 
 
+def safe_read_csv(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path)
+    except (EmptyDataError, ParserError):
+        # Fall back to Python engine and skip malformed rows (e.g. broken quotes).
+        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+
+
 def migrate_quotes_file_and_schema():
     if not QUOTES_PATH.exists():
         pd.DataFrame(columns=QUOTES_COLUMNS).to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
         return
 
     try:
-        df = pd.read_csv(QUOTES_PATH)
-    except EmptyDataError:
+        df = safe_read_csv(QUOTES_PATH)
+    except (EmptyDataError, ParserError):
         pd.DataFrame(columns=QUOTES_COLUMNS).to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
         return
 
@@ -101,8 +121,8 @@ def migrate_assignments_schema():
         return
 
     try:
-        df = pd.read_csv(ASSIGNMENTS_PATH)
-    except EmptyDataError:
+        df = safe_read_csv(ASSIGNMENTS_PATH)
+    except (EmptyDataError, ParserError):
         pd.DataFrame(columns=ASSIGNMENTS_COLUMNS).to_csv(ASSIGNMENTS_PATH, index=False, quoting=csv.QUOTE_ALL)
         return
 
@@ -119,8 +139,8 @@ def migrate_worker_quotes_schema():
         return
 
     try:
-        df = pd.read_csv(WORKER_QUOTES_PATH)
-    except EmptyDataError:
+        df = safe_read_csv(WORKER_QUOTES_PATH)
+    except (EmptyDataError, ParserError):
         pd.DataFrame(columns=WORKER_QUOTES_COLUMNS).to_csv(
             WORKER_QUOTES_PATH,
             index=False,
@@ -152,8 +172,8 @@ def migrate_final_quotes_schema():
         return
 
     try:
-        df = pd.read_csv(FINAL_QUOTES_PATH)
-    except EmptyDataError:
+        df = safe_read_csv(FINAL_QUOTES_PATH)
+    except (EmptyDataError, ParserError):
         pd.DataFrame(columns=FINAL_QUOTES_COLUMNS).to_csv(
             FINAL_QUOTES_PATH,
             index=False,
@@ -209,7 +229,7 @@ def read_csv(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = pd.read_csv(path)
+        df = safe_read_csv(path)
         for col in df.columns:
             if "DATE" in col.upper():
                 parsed = pd.to_datetime(df[col], errors="coerce")
@@ -217,7 +237,7 @@ def read_csv(path: Path) -> pd.DataFrame:
                     df[col] = parsed.dt.strftime("%Y-%m-%d")
                     df[col] = df[col].where(parsed.notna(), "")
         return df
-    except EmptyDataError:
+    except (EmptyDataError, ParserError):
         return pd.DataFrame()
 
 
