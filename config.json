@@ -1,6 +1,0 @@
-{
-  "default_markup_percent": 30,
-  "allow_partial_qty": false,
-  "preferred_condition": ["NE", "NS"],
-  "lead_time_priority": false
-}

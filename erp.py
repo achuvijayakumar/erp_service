@@ -298,13 +298,30 @@ users_df = read_csv(USERS_PATH)
 
 if not st.session_state.is_authenticated:
     st.title("ERP Login")
+
     usernames = users_df["USERNAME"].tolist()
-    selected_username = st.selectbox("Select User", usernames)
+
+    selected_username = st.selectbox(
+        "Select User",
+        usernames
+    )
+
+    password = st.text_input(
+        "Password",
+        type="password"
+    )
 
     if st.button("Login"):
+
         user_row = users_df[
             users_df["USERNAME"] == selected_username
         ].iloc[0]
+
+        stored_password = str(user_row["PASSWORD"])
+
+        if password != stored_password:
+            st.error("Invalid password")
+            st.stop()
 
         st.session_state.is_authenticated = True
         st.session_state.user_id = user_row["USER_ID"]
@@ -1512,14 +1529,15 @@ if role == "admin":
                         "FINAL_TOTAL",
                         "COND_AVAILABLE",
                         "LT",
-                        "CERTIFICATE_AVAILABLE",
+                        "CERTIFICATE_TYPE",
                         "CERTIFICATE_FILE"
                     ]].rename(columns={
                         "Customer ref NO": "REF NO",
                         "FINAL_UNIT_PRICE": "UNIT PRICE",
                         "FINAL_TOTAL": "TOTAL PRICE",
                         "COND_AVAILABLE": "CONDITION",
-                        "LT": "LEAD TIME"
+                        "LT": "LEAD TIME (DAYS)",
+                        "CERTIFICATE_TYPE": "CERTIFICATE TYPE"
                     })
 
                     st.dataframe(client_df, width='stretch')
@@ -1662,13 +1680,14 @@ else:
                     cost_price = st.number_input("PRICE", min_value=0.0, step=0.01)
                     cond_available = st.selectbox(
                         "COND AVAILABLE",
-                        ["NE", "NS", "OH", "SV", "AR"]
+                        ["NE", "NS", "OH", "SV", "AR","FN", "MOD"]
                     )
                     qty_available = st.number_input("QTY AVAILABLE", min_value=0, step=1)
                 with col2:
                     supplier = st.text_input("SUPPLIER")
                     lt = st.text_input("LT (Lead Time)")
                     certificate_available = st.toggle("Certificate Available")
+                    certificate_type = st.text_input("Certificate Type", key=f"cert_type_{user_id}_{sel_quote_id}_{sel_part_no}")
                     uploaded_cert = None
                     if certificate_available:
                         uploaded_cert = st.file_uploader(
@@ -1697,6 +1716,7 @@ else:
                             "LT": lt,
                             "CERTIFICATE_AVAILABLE": "YES" if certificate_available else "NO",
                             "CERTIFICATE_FILE": None,
+                            "CERTIFICATE_TYPE": certificate_type if certificate_available else "",
                             "REMARKS": remarks,
                             "WORKER_ID": user_id,
                             "SUBMITTED_DATE": datetime.now().strftime("%Y-%m-%d")

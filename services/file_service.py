@@ -32,6 +32,7 @@ USERS_COLUMNS = [
     "USER_ID",
     "USERNAME",
     "ROLE",
+    "PASSWORD",
 ]
 QUOTES_COLUMNS = [
     "QUOTE_ID",
@@ -65,6 +66,7 @@ WORKER_QUOTES_COLUMNS = [
     "LT",
     "CERTIFICATE_AVAILABLE",
     "CERTIFICATE_FILE",
+    "CERTIFICATE_TYPE",
     "REMARKS",
     "WORKER_ID",
     "SUBMITTED_DATE",
@@ -201,6 +203,24 @@ def get_next_quote_id() -> int:
     return int(df["QUOTE_ID"].max()) + 1
 
 
+def migrate_users_schema():
+    if not USERS_PATH.exists():
+        return
+
+    try:
+        df = safe_read_csv(USERS_PATH)
+    except (EmptyDataError, ParserError):
+        pd.DataFrame(columns=USERS_COLUMNS).to_csv(USERS_PATH, index=False, quoting=csv.QUOTE_ALL)
+        return
+
+    for col in USERS_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[USERS_COLUMNS]
+    df.to_csv(USERS_PATH, index=False, quoting=csv.QUOTE_ALL)
+
+
 initialize_file(ASSIGNMENTS_PATH, ASSIGNMENTS_COLUMNS)
 initialize_file(WORKER_QUOTES_PATH, WORKER_QUOTES_COLUMNS)
 initialize_file(FINAL_QUOTES_PATH, FINAL_QUOTES_COLUMNS)
@@ -210,6 +230,7 @@ initialize_file(QUOTES_PATH, QUOTES_COLUMNS)
 migrate_assignments_schema()
 migrate_worker_quotes_schema()
 migrate_final_quotes_schema()
+migrate_users_schema()
 
 
 # -------------------
