@@ -57,9 +57,12 @@ ASSIGNMENTS_COLUMNS = [
     "WORKER_DUE_DATE",
 ]
 WORKER_QUOTES_COLUMNS = [
+    "SUBMISSION_ID",
     "QUOTE_ID",
     "PART NO",
     "SUPPLIER",
+    "SUPPLIER_COUNTRY",
+    "SUPPLIER_SOURCE",
     "PRICE",
     "COND_AVAILABLE",
     "QTY_AVAILABLE",
@@ -70,6 +73,9 @@ WORKER_QUOTES_COLUMNS = [
     "REMARKS",
     "WORKER_ID",
     "SUBMITTED_DATE",
+    "EDIT_REQUIRED",
+    "NO_QUOTE",
+    "NO_QUOTE_REMARK",
 ]
 FINAL_QUOTES_COLUMNS = [
     "QUOTE_ID",
@@ -79,6 +85,7 @@ FINAL_QUOTES_COLUMNS = [
     "MARGIN_PERCENT",
     "FINAL_UNIT_PRICE",
     "FINAL_TOTAL",
+    "SELECTED_SUBMISSION_ID",
     "GENERATED_DATE",
 ]
 
@@ -86,11 +93,6 @@ FINAL_QUOTES_COLUMNS = [
 # -------------------
 # INITIALIZE FILES
 # -------------------
-def initialize_file(path: Path, columns: list[str]):
-    if not path.exists():
-        pd.DataFrame(columns=columns).to_csv(path, index=False)
-
-
 def safe_read_csv(path: Path) -> pd.DataFrame:
     try:
         return pd.read_csv(path)
@@ -99,99 +101,49 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, engine="python", on_bad_lines="skip")
 
 
-def migrate_quotes_file_and_schema():
+def ensure_users_file():
+    if not USERS_PATH.exists():
+        pd.DataFrame(columns=USERS_COLUMNS).to_csv(
+            USERS_PATH,
+            index=False,
+            quoting=csv.QUOTE_ALL,
+        )
+
+
+def ensure_quotes_file():
     if not QUOTES_PATH.exists():
-        pd.DataFrame(columns=QUOTES_COLUMNS).to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
-        return
-
-    try:
-        df = safe_read_csv(QUOTES_PATH)
-    except (EmptyDataError, ParserError):
-        pd.DataFrame(columns=QUOTES_COLUMNS).to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
-        return
-
-    for col in QUOTES_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    df = df[QUOTES_COLUMNS]
-    df.to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+        pd.DataFrame(columns=QUOTES_COLUMNS).to_csv(
+            QUOTES_PATH,
+            index=False,
+            quoting=csv.QUOTE_ALL,
+        )
 
 
-def migrate_assignments_schema():
+def ensure_assignments_file():
     if not ASSIGNMENTS_PATH.exists():
-        return
-
-    try:
-        df = safe_read_csv(ASSIGNMENTS_PATH)
-    except (EmptyDataError, ParserError):
-        pd.DataFrame(columns=ASSIGNMENTS_COLUMNS).to_csv(ASSIGNMENTS_PATH, index=False, quoting=csv.QUOTE_ALL)
-        return
-
-    for col in ASSIGNMENTS_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    df = df[ASSIGNMENTS_COLUMNS]
-    df.to_csv(ASSIGNMENTS_PATH, index=False, quoting=csv.QUOTE_ALL)
+        pd.DataFrame(columns=ASSIGNMENTS_COLUMNS).to_csv(
+            ASSIGNMENTS_PATH,
+            index=False,
+            quoting=csv.QUOTE_ALL,
+        )
 
 
-def migrate_worker_quotes_schema():
+def ensure_worker_submissions_file():
     if not WORKER_QUOTES_PATH.exists():
-        return
-
-    try:
-        df = safe_read_csv(WORKER_QUOTES_PATH)
-    except (EmptyDataError, ParserError):
         pd.DataFrame(columns=WORKER_QUOTES_COLUMNS).to_csv(
             WORKER_QUOTES_PATH,
             index=False,
             quoting=csv.QUOTE_ALL,
         )
-        return
-
-    rename_map = {
-        "COST_PRICE_EA": "PRICE",
-        "COST": "COST_PRICE_EA",
-        "COND": "COND_AVAILABLE",
-        "LEAD_TIME": "LT",
-        "REMARK": "REMARKS",
-    }
-    df = df.rename(columns=rename_map)
-    if "COST_PRICE_EA" in df.columns and "PRICE" not in df.columns:
-        df["PRICE"] = df["COST_PRICE_EA"]
-
-    for col in WORKER_QUOTES_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    df = df[WORKER_QUOTES_COLUMNS]
-    df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
 
 
-def migrate_final_quotes_schema():
+def ensure_final_quotes_file():
     if not FINAL_QUOTES_PATH.exists():
-        return
-
-    try:
-        df = safe_read_csv(FINAL_QUOTES_PATH)
-    except (EmptyDataError, ParserError):
         pd.DataFrame(columns=FINAL_QUOTES_COLUMNS).to_csv(
             FINAL_QUOTES_PATH,
             index=False,
             quoting=csv.QUOTE_ALL,
         )
-        return
-
-    if "WORKER_COST" in df.columns and "PRICE" not in df.columns:
-        df["PRICE"] = df["WORKER_COST"]
-
-    for col in FINAL_QUOTES_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    df = df[FINAL_QUOTES_COLUMNS]
-    df.to_csv(FINAL_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
 
 
 def get_next_quote_id() -> int:
@@ -203,34 +155,11 @@ def get_next_quote_id() -> int:
     return int(df["QUOTE_ID"].max()) + 1
 
 
-def migrate_users_schema():
-    if not USERS_PATH.exists():
-        return
-
-    try:
-        df = safe_read_csv(USERS_PATH)
-    except (EmptyDataError, ParserError):
-        pd.DataFrame(columns=USERS_COLUMNS).to_csv(USERS_PATH, index=False, quoting=csv.QUOTE_ALL)
-        return
-
-    for col in USERS_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    df = df[USERS_COLUMNS]
-    df.to_csv(USERS_PATH, index=False, quoting=csv.QUOTE_ALL)
-
-
-initialize_file(ASSIGNMENTS_PATH, ASSIGNMENTS_COLUMNS)
-initialize_file(WORKER_QUOTES_PATH, WORKER_QUOTES_COLUMNS)
-initialize_file(FINAL_QUOTES_PATH, FINAL_QUOTES_COLUMNS)
-initialize_file(USERS_PATH, USERS_COLUMNS)
-migrate_quotes_file_and_schema()
-initialize_file(QUOTES_PATH, QUOTES_COLUMNS)
-migrate_assignments_schema()
-migrate_worker_quotes_schema()
-migrate_final_quotes_schema()
-migrate_users_schema()
+ensure_users_file()
+ensure_quotes_file()
+ensure_assignments_file()
+ensure_worker_submissions_file()
+ensure_final_quotes_file()
 
 
 # -------------------

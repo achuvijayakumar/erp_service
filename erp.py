@@ -1,5 +1,6 @@
 import streamlit as st
 import json
+import uuid
 import pandas as pd
 import csv
 import re
@@ -246,6 +247,33 @@ def safe_filename_part(value: str) -> str:
     return safe or "NA"
 
 
+def clean_text(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def make_unique_label(base_label: str, disambiguation_values: list[str], existing_labels: set[str]) -> str:
+    base_label = clean_text(base_label) or "N/A"
+    if base_label not in existing_labels:
+        return base_label
+
+    for value in disambiguation_values:
+        suffix = clean_text(value)
+        if not suffix:
+            continue
+        candidate = f"{base_label} | {suffix}"
+        if candidate not in existing_labels:
+            return candidate
+
+    suffix_index = 2
+    while True:
+        candidate = f"{base_label} (#{suffix_index})"
+        if candidate not in existing_labels:
+            return candidate
+        suffix_index += 1
+
+
 def update_quote_status_if_fully_submitted(quote_id: str):
     quotes_df = read_csv(QUOTES_PATH)
     worker_df = read_csv(WORKER_QUOTES_PATH)
@@ -273,7 +301,7 @@ def update_quote_status_if_fully_submitted(quote_id: str):
         return False
 
     current_statuses = quote_rows["STATUS"].astype(str).str.strip().str.upper().unique().tolist()
-    if any(s in {"DELETED", "FINALIZED", "SENT_TO_CLIENT"} for s in current_statuses):
+    if any(s in {"DELETED", "COMPLETED"} for s in current_statuses):
         return False
 
     # Only move forward if ALL parts submitted
@@ -356,9 +384,9 @@ if role == "admin":
     ])
 else:
     tabs = st.tabs([
-         "Assigned Parts",
+         "Assigned (Pending)",
         "Submit Supplier Info",
-        "My Submissions"
+        "My Submitted Quotes"
     ])
 # -----------------------------------------------
 def parse_excel(file) -> pd.DataFrame:
@@ -374,8 +402,8 @@ def parse_excel(file) -> pd.DataFrame:
         "Customer ref NO",
         "PART NO",
         "DESCRIPTION",
-        "COND",
         "QTY",
+        "COND",
         "DUE DATE"
     ]
 
@@ -402,8 +430,8 @@ if role == "admin":
             "Customer ref NO",
             "PART NO",
             "DESCRIPTION",
-            "COND",
             "QTY",
+            "COND",
             "DUE DATE"
         ])
         st.download_button(
@@ -427,8 +455,8 @@ if role == "admin":
             "Customer ref NO",
             "PART NO",
             "DESCRIPTION",
-            "COND",
             "QTY",
+            "COND",
             "DUE DATE"
         ])
 
@@ -446,8 +474,8 @@ if role == "admin":
                     "Customer ref NO",
                     "PART NO",
                     "DESCRIPTION",
-                    "COND",
                     "QTY",
+                    "COND",
                     "DUE DATE"
                 ])
 
@@ -494,8 +522,8 @@ if role == "admin":
             "Customer ref NO",
             "PART NO",
             "DESCRIPTION",
-            "COND",
             "QTY",
+            "COND",
             "DUE DATE"
         ])
         for text_col in ["CUSTOMER NAME", "CUSTOMER ID"]:
@@ -635,9 +663,9 @@ if role == "admin":
             quotes_df["STATUS_NORM"] = quotes_df["STATUS"].str.upper()
 
             active_quotes_df = quotes_df[
-                ~quotes_df["STATUS_NORM"].isin(["SENT_TO_CLIENT", "DELETED"])
+                ~quotes_df["STATUS_NORM"].isin(["COMPLETED", "DELETED"])
             ].copy()
-            archive_quotes_df = quotes_df[quotes_df["STATUS_NORM"] == "SENT_TO_CLIENT"].copy()
+            archive_quotes_df = quotes_df[quotes_df["STATUS_NORM"] == "COMPLETED"].copy()
             deleted_quotes_df = quotes_df[quotes_df["STATUS_NORM"] == "DELETED"].copy()
 
             master_active_tab, master_archive_tab, master_deleted_tab = st.tabs(["Active", "Archive", "Deleted"])
@@ -653,7 +681,8 @@ if role == "admin":
                         active_quotes_df.drop(columns=["STATUS_NORM"], errors="ignore"),
                         "master_active"
                     )
-                    st.dataframe(filtered_df)
+                    display_df = filtered_df.drop(columns=["SL NO"], errors="ignore")
+                    st.dataframe(display_df)
                     render_export_button(
                         "Export Active Quotes Excel",
                         active_quotes_df.drop(columns=["STATUS_NORM"], errors="ignore"),
@@ -700,7 +729,8 @@ if role == "admin":
                         archive_quotes_df.drop(columns=["STATUS_NORM"], errors="ignore"),
                         "master_archive"
                     )
-                    st.dataframe(filtered_archive)
+                    display_archive_df = filtered_archive.drop(columns=["SL NO"], errors="ignore")
+                    st.dataframe(display_archive_df)
                     render_export_button(
                         "Download Completed Quotes Excel",
                         archive_quotes_df.drop(columns=["STATUS_NORM"], errors="ignore"),
@@ -718,12 +748,85 @@ if role == "admin":
                         deleted_quotes_df.drop(columns=["STATUS_NORM"], errors="ignore"),
                         "master_deleted"
                     )
-                    st.dataframe(filtered_deleted)
+                    display_deleted_df = filtered_deleted.drop(columns=["SL NO"], errors="ignore")
+                    st.dataframe(display_deleted_df)
                     render_export_button(
                         "Export Deleted Quotes Excel",
                         deleted_quotes_df.drop(columns=["STATUS_NORM"], errors="ignore"),
                         "deleted_quotes.xlsx"
                     )
+
+                    st.divider()
+                    st.subheader("Permanent Cleanup")
+                    confirm_clear_deleted = st.checkbox(
+                        "I confirm that all deleted quotes and related records should be permanently removed.",
+                        key="confirm_clear_deleted_quotes",
+                    )
+                    if st.button("Clear All Deleted Quotes", key="clear_all_deleted_quotes_btn"):
+                        if not confirm_clear_deleted:
+                            st.warning("Please confirm before clearing deleted quotes.")
+                        else:
+                            quotes_cleanup_df = read_csv(QUOTES_PATH)
+                            quotes_cleanup_df = enforce_schema(quotes_cleanup_df, QUOTES_COLUMNS)
+                            quotes_cleanup_df["QUOTE_ID"] = quotes_cleanup_df["QUOTE_ID"].astype(str).str.strip()
+                            quotes_cleanup_df["STATUS"] = quotes_cleanup_df["STATUS"].astype(str).str.strip().str.upper()
+
+                            deleted_quote_ids = set(
+                                quotes_cleanup_df.loc[
+                                    quotes_cleanup_df["STATUS"] == "DELETED",
+                                    "QUOTE_ID",
+                                ].astype(str).str.strip()
+                            )
+                            deleted_quote_ids.discard("")
+
+                            if not deleted_quote_ids:
+                                st.info("No deleted quotes found.")
+                            else:
+                                quotes_cleanup_df = quotes_cleanup_df[
+                                    ~quotes_cleanup_df["QUOTE_ID"].isin(deleted_quote_ids)
+                                ].copy()
+                                quotes_cleanup_df.to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+
+                                assignments_cleanup_df = read_csv(ASSIGNMENTS_PATH)
+                                assignments_cleanup_df = enforce_schema(assignments_cleanup_df, ASSIGNMENTS_COLUMNS)
+                                assignments_cleanup_df["QUOTE_ID"] = assignments_cleanup_df["QUOTE_ID"].astype(str).str.strip()
+                                assignments_cleanup_df = assignments_cleanup_df[
+                                    ~assignments_cleanup_df["QUOTE_ID"].isin(deleted_quote_ids)
+                                ].copy()
+                                assignments_cleanup_df.to_csv(ASSIGNMENTS_PATH, index=False, quoting=csv.QUOTE_ALL)
+
+                                worker_cleanup_df = read_csv(WORKER_QUOTES_PATH)
+                                worker_cleanup_df = enforce_schema(worker_cleanup_df, WORKER_QUOTES_COLUMNS)
+                                worker_cleanup_df["QUOTE_ID"] = worker_cleanup_df["QUOTE_ID"].astype(str).str.strip()
+                                
+                                deleted_workers = worker_cleanup_df[worker_cleanup_df["QUOTE_ID"].isin(deleted_quote_ids)]
+                                if "CERTIFICATE_FILE" in deleted_workers.columns:
+                                    for cert in deleted_workers["CERTIFICATE_FILE"].dropna().unique():
+                                        cert_str = str(cert).strip()
+                                        if cert_str:
+                                            cert_name = Path(cert_str).name
+                                            cert_path = CERTIFICATE_DIR / cert_name
+                                            if cert_path.exists():
+                                                try:
+                                                    cert_path.unlink()
+                                                except Exception as e:
+                                                    print(f"Certificate deletion failed: {cert_path} -> {e}")
+
+                                worker_cleanup_df = worker_cleanup_df[
+                                    ~worker_cleanup_df["QUOTE_ID"].isin(deleted_quote_ids)
+                                ].copy()
+                                worker_cleanup_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+
+                                final_cleanup_df = read_csv(FINAL_QUOTES_PATH)
+                                final_cleanup_df = enforce_schema(final_cleanup_df, FINAL_QUOTES_COLUMNS)
+                                final_cleanup_df["QUOTE_ID"] = final_cleanup_df["QUOTE_ID"].astype(str).str.strip()
+                                final_cleanup_df = final_cleanup_df[
+                                    ~final_cleanup_df["QUOTE_ID"].isin(deleted_quote_ids)
+                                ].copy()
+                                final_cleanup_df.to_csv(FINAL_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+
+                                st.success("Deleted quotes permanently removed")
+                                st.rerun()
         else:
             st.info("No quotes uploaded yet.")
 
@@ -831,6 +934,15 @@ if role == "admin":
                                     if not duplicate.empty:
                                         st.warning("This QUOTE_ID is already assigned.")
                                     else:
+                                        # Double check status before committing assignment
+                                        curr_quotes = read_csv(QUOTES_PATH)
+                                        if not curr_quotes.empty:
+                                            curr_quotes["QUOTE_ID"] = curr_quotes["QUOTE_ID"].astype(str).str.strip()
+                                            q_status_rows = curr_quotes[curr_quotes["QUOTE_ID"] == str(row["QUOTE_ID"]).strip()]["STATUS"].astype(str).str.strip().str.upper()
+                                            if not q_status_rows.empty and q_status_rows.iloc[0] == "COMPLETED":
+                                                st.error("This RFQ is already COMPLETED and cannot be reassigned.")
+                                                st.stop()
+                                        
                                         worker_id = worker_df[
                                             worker_df["USERNAME"] == selected_worker
                                         ]["USER_ID"].values[0]
@@ -932,13 +1044,22 @@ if role == "admin":
 
         submissions_df = read_csv(WORKER_QUOTES_PATH)
         if not submissions_df.empty:
+            if "EDIT_REQUIRED" not in submissions_df.columns:
+                submissions_df["EDIT_REQUIRED"] = "NO"
+            if "NO_QUOTE" not in submissions_df.columns:
+                submissions_df["NO_QUOTE"] = "NO"
+            submissions_df["EDIT_REQUIRED"] = submissions_df["EDIT_REQUIRED"].fillna("").astype(str).str.strip().str.upper()
+            submissions_df.loc[~submissions_df["EDIT_REQUIRED"].isin(["YES", "NO"]), "EDIT_REQUIRED"] = "NO"
+            submissions_df["NO_QUOTE"] = submissions_df["NO_QUOTE"].fillna("").astype(str).str.strip().str.upper()
+            submissions_df.loc[~submissions_df["NO_QUOTE"].isin(["YES", "NO"]), "NO_QUOTE"] = "NO"
+
             users_lookup = users_df[["USER_ID", "USERNAME"]].copy()
             users_lookup["USER_ID"] = users_lookup["USER_ID"].astype(str).str.strip()
             quotes_lookup = read_csv(QUOTES_PATH)
             if not quotes_lookup.empty:
                 quotes_lookup["QUOTE_ID"] = quotes_lookup["QUOTE_ID"].astype(str).str.strip()
                 quotes_lookup["PART NO"] = quotes_lookup["PART NO"].astype(str).str.strip()
-                quotes_lookup = quotes_lookup[["QUOTE_ID", "PART NO", "Customer ref NO"]].drop_duplicates()
+                quotes_lookup = quotes_lookup[["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION"]].drop_duplicates()
 
             part_details_view = submissions_df.copy()
             part_details_view["QUOTE_ID"] = part_details_view["QUOTE_ID"].astype(str).str.strip()
@@ -957,74 +1078,318 @@ if role == "admin":
                 how="left"
             )
             part_details_view = part_details_view.rename(columns={"USERNAME": "WORKER_NAME"})
-            part_details_view = part_details_view.drop(columns=["USER_ID", "WORKER_ID"], errors="ignore")
+            part_details_view = part_details_view.drop(columns=["USER_ID"], errors="ignore")
+            part_details_view["EDIT_REQUIRED"] = part_details_view["EDIT_REQUIRED"].fillna("").astype(str).str.strip().str.upper()
+            part_details_view.loc[~part_details_view["EDIT_REQUIRED"].isin(["YES", "NO"]), "EDIT_REQUIRED"] = "NO"
+            part_details_view["NO_QUOTE"] = part_details_view["NO_QUOTE"].fillna("").astype(str).str.strip().str.upper()
+            part_details_view.loc[~part_details_view["NO_QUOTE"].isin(["YES", "NO"]), "NO_QUOTE"] = "NO"
 
-            filtered_part_details = apply_part_details_filters(
-                part_details_view,
-                "part_details"
-            )
-            st.dataframe(filtered_part_details, use_container_width=True)
+            part_details_view_tab, part_details_reassign_tab, part_details_no_quote_tab = st.tabs(["View", "Re-Assign", "No Quote"])
 
-            cert_source_df = filtered_part_details.copy()
-            if "CERTIFICATE_FILE" not in cert_source_df.columns:
-                cert_source_df["CERTIFICATE_FILE"] = None
-            cert_source_df["CERTIFICATE_FILE"] = (
-                cert_source_df["CERTIFICATE_FILE"].fillna("").astype(str).str.strip()
-            )
+            with part_details_view_tab:
+                if st.session_state.pop("part_details_changes_saved", False):
+                    st.success("Changes saved")
 
-            with st.expander("Certificate Downloads", expanded=False):
-                for idx, row in cert_source_df.iterrows():
-                    cert_file = str(row.get("CERTIFICATE_FILE", "")).strip()
-                    if not cert_file:
-                        continue
+                visible_part_details = part_details_view[
+                    (part_details_view["EDIT_REQUIRED"] == "NO") &
+                    (part_details_view["NO_QUOTE"] == "NO")
+                ].copy()
+                if visible_part_details.empty:
+                    st.info("No part details ready for review.")
+                else:
+                    filtered_part_details = apply_part_details_filters(
+                        visible_part_details,
+                        "part_details_view"
+                    )
+                    editor_columns = [
+                        "QUOTE_ID",
+                        "PART NO",
+                        "SUPPLIER",
+                        "SUPPLIER_COUNTRY",
+                        "SUPPLIER_SOURCE",
+                        "PRICE",
+                        "COND_AVAILABLE",
+                        "QTY_AVAILABLE",
+                        "LT",
+                        "REMARKS",
+                        "CERTIFICATE_TYPE",
+                        "WORKER_NAME",
+                        "SUBMITTED_DATE",
+                    ]
+                    for col in editor_columns:
+                        if col not in filtered_part_details.columns:
+                            filtered_part_details[col] = ""
+                    editor_df = filtered_part_details[editor_columns].copy()
+                    text_cols = [
+                        "QUOTE_ID",
+                        "PART NO",
+                        "SUPPLIER",
+                        "SUPPLIER_COUNTRY",
+                        "SUPPLIER_SOURCE",
+                        "COND_AVAILABLE",
+                        "LT",
+                        "REMARKS",
+                        "CERTIFICATE_TYPE",
+                        "WORKER_NAME",
+                        "SUBMITTED_DATE",
+                    ]
+                    for col in text_cols:
+                        editor_df[col] = editor_df[col].fillna("").astype(str).str.strip()
+                    editor_df["PRICE"] = pd.to_numeric(editor_df["PRICE"], errors="coerce")
+                    editor_df["QTY_AVAILABLE"] = pd.to_numeric(editor_df["QTY_AVAILABLE"], errors="coerce")
 
-                    file_path = CERTIFICATE_DIR / cert_file
-                    row_key = (
-                        f"cert_download_{safe_filename_part(row.get('QUOTE_ID', ''))}_"
-                        f"{safe_filename_part(row.get('PART NO', ''))}_"
-                        f"{safe_filename_part(row.get('SUPPLIER', ''))}_{idx}"
+                    edited_part_details = st.data_editor(
+                        editor_df,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        disabled=["QUOTE_ID", "PART NO", "SUPPLIER", "WORKER_NAME", "SUBMITTED_DATE"],
+                        column_config={
+                            "PRICE": st.column_config.NumberColumn("PRICE", min_value=0.0, step=0.01),
+                            "QTY_AVAILABLE": st.column_config.NumberColumn("QTY_AVAILABLE", min_value=0, step=1),
+                            "COND_AVAILABLE": st.column_config.SelectboxColumn(
+                                "COND_AVAILABLE",
+                                options=["NE", "NS", "OH", "SV", "AR", "FN", "MOD","RP","IN"],
+                            ),
+                        },
+                        key="part_details_view_editor",
                     )
 
-                    c1, c2, c3, c4 = st.columns([2.2, 2, 2, 1.2])
-                    with c1:
-                        st.write(str(row.get("QUOTE_ID", "")))
-                    with c2:
-                        st.write(str(row.get("PART NO", "")))
-                    with c3:
-                        st.write(str(row.get("SUPPLIER", "")))
-                    with c4:
-                        if file_path.exists():
-                            with open(file_path, "rb") as f:
-                                st.download_button(
-                                    label="Download",
-                                    data=f.read(),
-                                    file_name=cert_file,
-                                    key=row_key
-                                )
+                    if st.button("Save Changes", key="part_details_save_changes_btn"):
+                        update_df = read_csv(WORKER_QUOTES_PATH)
+                        if update_df.empty:
+                            st.error("No submissions found to update.")
                         else:
-                            st.write("File missing")
+                            update_df = enforce_schema(update_df, WORKER_QUOTES_COLUMNS)
+                            update_df["QUOTE_ID"] = update_df["QUOTE_ID"].astype(str).str.strip()
+                            update_df["PART NO"] = update_df["PART NO"].astype(str).str.strip()
+                            update_df["SUPPLIER"] = update_df["SUPPLIER"].astype(str).str.strip()
 
-            zip_buffer = io.BytesIO()
-            excel_bytes = to_excel_bytes(filtered_part_details)
-            with zipfile.ZipFile(zip_buffer, "w") as zf:
-                zf.writestr("part_details.xlsx", excel_bytes)
-                added_files = set()
-                for _, row in cert_source_df.iterrows():
-                    cert_file = str(row.get("CERTIFICATE_FILE", "")).strip()
-                    if not cert_file or cert_file in added_files:
-                        continue
-                    file_path = CERTIFICATE_DIR / cert_file
-                    if file_path.exists():
-                        zf.write(file_path, arcname=f"certificates/{cert_file}")
-                        added_files.add(cert_file)
+                            updated_keys = set()
+                            for idx, row in edited_part_details.iterrows():
+                                sub_id = str(filtered_part_details.loc[idx, "SUBMISSION_ID"]).strip()
+                                quote_id = str(row.get("QUOTE_ID", "")).strip()
+                                part_no = str(row.get("PART NO", "")).strip()
+                                supplier = str(row.get("SUPPLIER", "")).strip()
+                                if not sub_id:
+                                    continue
 
-            st.download_button(
-                "Download Part Details (ZIP)",
-                zip_buffer.getvalue(),
-                file_name="part_details.zip",
-                mime="application/zip",
-                key="part_details_zip_download"
-            )
+                                mask = (update_df["SUBMISSION_ID"] == sub_id)
+                                if not mask.any():
+                                    continue
+
+                                price_val = pd.to_numeric(pd.Series([row.get("PRICE", None)]), errors="coerce").iloc[0]
+                                qty_val = pd.to_numeric(pd.Series([row.get("QTY_AVAILABLE", None)]), errors="coerce").iloc[0]
+                                update_df.loc[mask, "SUPPLIER_COUNTRY"] = str(row.get("SUPPLIER_COUNTRY", "")).strip()
+                                update_df.loc[mask, "PRICE"] = None if pd.isna(price_val) else float(price_val)
+                                update_df.loc[mask, "COND_AVAILABLE"] = str(row.get("COND_AVAILABLE", "")).strip()
+                                update_df.loc[mask, "QTY_AVAILABLE"] = None if pd.isna(qty_val) else int(qty_val)
+                                update_df.loc[mask, "LT"] = str(row.get("LT", "")).strip()
+                                update_df.loc[mask, "REMARKS"] = str(row.get("REMARKS", "")).strip()
+                                update_df.loc[mask, "CERTIFICATE_TYPE"] = str(row.get("CERTIFICATE_TYPE", "")).strip()
+                                updated_keys.add(sub_id)
+
+                            update_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                            if not updated_keys:
+                                st.warning("No matching rows were updated.")
+                            else:
+                                st.session_state["part_details_changes_saved"] = True
+                            st.rerun()
+
+                    cert_source_df = filtered_part_details.copy()
+                    if "CERTIFICATE_FILE" not in cert_source_df.columns:
+                        cert_source_df["CERTIFICATE_FILE"] = None
+                    cert_source_df["CERTIFICATE_FILE"] = (
+                        cert_source_df["CERTIFICATE_FILE"].fillna("").astype(str).str.strip()
+                    )
+
+                    with st.expander("Certificate Downloads", expanded=False):
+                        for idx, row in cert_source_df.iterrows():
+                            cert_file = str(row.get("CERTIFICATE_FILE", "")).strip()
+                            if not cert_file:
+                                continue
+
+                            file_path = CERTIFICATE_DIR / cert_file
+                            row_key = (
+                                f"cert_download_{safe_filename_part(row.get('QUOTE_ID', ''))}_"
+                                f"{safe_filename_part(row.get('PART NO', ''))}_"
+                                f"{safe_filename_part(row.get('SUPPLIER', ''))}_{idx}"
+                            )
+
+                            c1, c2, c3, c4 = st.columns([2.2, 2, 2, 1.2])
+                            with c1:
+                                st.write(str(row.get("QUOTE_ID", "")))
+                            with c2:
+                                st.write(str(row.get("PART NO", "")))
+                            with c3:
+                                st.write(str(row.get("SUPPLIER", "")))
+                            with c4:
+                                if file_path.exists():
+                                    with open(file_path, "rb") as f:
+                                        st.download_button(
+                                            label="Download",
+                                            data=f.read(),
+                                            file_name=cert_file,
+                                            key=row_key
+                                        )
+                                else:
+                                    st.write("File missing")
+
+                    zip_buffer = io.BytesIO()
+                    excel_bytes = to_excel_bytes(filtered_part_details)
+                    with zipfile.ZipFile(zip_buffer, "w") as zf:
+                        zf.writestr("part_details.xlsx", excel_bytes)
+                        added_files = set()
+                        for _, row in cert_source_df.iterrows():
+                            cert_file = str(row.get("CERTIFICATE_FILE", "")).strip()
+                            if not cert_file or cert_file in added_files:
+                                continue
+                            file_path = CERTIFICATE_DIR / cert_file
+                            if file_path.exists():
+                                zf.write(file_path, arcname=f"certificates/{cert_file}")
+                                added_files.add(cert_file)
+
+                    st.download_button(
+                        "Download Part Details (ZIP)",
+                        zip_buffer.getvalue(),
+                        file_name="part_details.zip",
+                        mime="application/zip",
+                        key="part_details_zip_download"
+                    )
+
+            with part_details_reassign_tab:
+                reassign_candidates = part_details_view[
+                    (part_details_view["EDIT_REQUIRED"] == "NO") &
+                    (part_details_view["NO_QUOTE"] == "NO")
+                ].copy()
+                if reassign_candidates.empty:
+                    st.info("No submitted rows available to re-assign.")
+                else:
+                    filtered_reassign = apply_part_details_filters(
+                        reassign_candidates,
+                        "part_details_reassign"
+                    )
+                    st.dataframe(
+                        filtered_reassign.drop(columns=["WORKER_ID", "SUBMISSION_ID"], errors="ignore"),
+                        use_container_width=True
+                    )
+
+                    key_rows = filtered_reassign[["SUBMISSION_ID", "QUOTE_ID", "PART NO", "SUPPLIER"]].copy()
+                    key_rows["SUBMISSION_ID"] = key_rows["SUBMISSION_ID"].astype(str).str.strip()
+                    key_rows["QUOTE_ID"] = key_rows["QUOTE_ID"].astype(str).str.strip()
+                    key_rows["PART NO"] = key_rows["PART NO"].astype(str).str.strip()
+                    key_rows["SUPPLIER"] = key_rows["SUPPLIER"].astype(str).str.strip()
+                    key_rows = key_rows.drop_duplicates()
+
+                    select_options = list(key_rows.itertuples(index=False, name=None))
+                    selected_rows = st.multiselect(
+                        "Select row(s) to send back",
+                        options=select_options,
+                        format_func=lambda x: f"{x[1]} | {x[2]} | {x[3]}",
+                        key="part_details_send_back_select"
+                    )
+
+                    # Worker dropdown for reassignment
+                    reassign_users_df = read_csv(USERS_PATH)
+                    worker_users = reassign_users_df[
+                        reassign_users_df["ROLE"].astype(str).str.strip().str.lower() == "worker"
+                    ].copy()
+                    worker_id_name_map = dict(
+                        zip(
+                            worker_users["USER_ID"].astype(str).str.strip(),
+                            worker_users["USERNAME"].astype(str).str.strip(),
+                        )
+                    )
+                    worker_options = [("", "<Select Worker>")] + list(worker_id_name_map.items())
+
+                    # Determine default worker
+                    default_index = 0  # Default to "<Select Worker>"
+                    if selected_rows:
+                        selected_sub_ids = {str(r[0]).strip() for r in selected_rows}
+                        matched_worker_ids = set()
+                        for _, row in filtered_reassign.iterrows():
+                            if str(row.get("SUBMISSION_ID", "")).strip() in selected_sub_ids:
+                                matched_worker_ids.add(str(row.get("WORKER_ID", "")).strip())
+                        
+                        if len(matched_worker_ids) == 1:
+                            current_wid = matched_worker_ids.pop()
+                            # Search in worker_options starting from index 1
+                            for idx, (wid, _) in enumerate(worker_options):
+                                if wid == current_wid:
+                                    default_index = idx
+                                    break
+
+                    reassign_worker = st.selectbox(
+                        "Reassign To Worker",
+                        options=worker_options,
+                        index=default_index,
+                        format_func=lambda x: x[1],
+                        key="part_details_reassign_worker_select"
+                    )
+
+                    if st.button("Send Back To Worker", key="part_details_send_back_btn"):
+                        if not selected_rows:
+                            st.warning("Select at least one row to send back.")
+                        elif not reassign_worker or reassign_worker[0] == "":
+                            st.warning("Please select a worker for reassignment.")
+                        else:
+                            target_worker_id = reassign_worker[0]
+                            target_worker_name = reassign_worker[1]
+
+                            update_df = read_csv(WORKER_QUOTES_PATH)
+                            if update_df.empty:
+                                st.error("No submissions found to update.")
+                            else:
+                                if "EDIT_REQUIRED" not in update_df.columns:
+                                    update_df["EDIT_REQUIRED"] = "NO"
+                                update_df["SUBMISSION_ID"] = update_df["SUBMISSION_ID"].astype(str).str.strip()
+                                update_df["WORKER_ID"] = update_df["WORKER_ID"].astype(str).str.strip()
+                                update_df["EDIT_REQUIRED"] = update_df["EDIT_REQUIRED"].fillna("").astype(str).str.strip().str.upper()
+                                update_df.loc[~update_df["EDIT_REQUIRED"].isin(["YES", "NO"]), "EDIT_REQUIRED"] = "NO"
+
+                                updated_rows = 0
+                                for sub_id, quote_id, part_no, supplier in selected_rows:
+                                    mask = (update_df["SUBMISSION_ID"] == str(sub_id).strip())
+                                    if mask.any():
+                                        update_df.loc[mask, "EDIT_REQUIRED"] = "YES"
+                                        update_df.loc[mask, "WORKER_ID"] = target_worker_id
+                                        updated_rows += int(mask.sum())
+
+                                update_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                                if updated_rows == 0:
+                                    st.warning("No matching rows were updated.")
+                                else:
+                                    st.success(f"{len(selected_rows)} row(s) reassigned to {target_worker_name}.")
+                                st.rerun()
+
+            with part_details_no_quote_tab:
+                no_quote_rows = part_details_view[
+                    part_details_view["NO_QUOTE"] == "YES"
+                ].copy()
+                if no_quote_rows.empty:
+                    st.info("No rows are currently marked as No Quote.")
+                else:
+                    display_cols = [
+                        "Customer ref NO",
+                        "PART NO",
+                        "DESCRIPTION",
+                        "WORKER_NAME",
+                        "NO_QUOTE_REMARK",
+                        "SUBMITTED_DATE",
+                    ]
+                    for col in display_cols:
+                        if col not in no_quote_rows.columns:
+                            no_quote_rows[col] = ""
+                    no_quote_display = no_quote_rows[display_cols].copy()
+                    no_quote_display = no_quote_display.rename(
+                        columns={
+                            "Customer ref NO": "REF NO",
+                            "WORKER_NAME": "WORKER",
+                            "NO_QUOTE_REMARK": "REMARK",
+                            "SUBMITTED_DATE": "DATE",
+                        }
+                    )
+                    no_quote_display["STATUS"] = "NO QUOTE"
+                    st.dataframe(no_quote_display, use_container_width=True)
         else:
             st.info("No part details yet.")
 
@@ -1060,6 +1425,16 @@ if role == "admin":
                 df["QUOTE_ID"] = df["QUOTE_ID"].astype(str).str.strip()
                 df["PART NO"] = df["PART NO"].astype(str).str.strip()
 
+            if "NO_QUOTE" not in worker_df.columns:
+                worker_df["NO_QUOTE"] = "NO"
+            worker_df["NO_QUOTE"] = worker_df["NO_QUOTE"].fillna("").astype(str).str.strip().str.upper()
+            worker_df.loc[~worker_df["NO_QUOTE"].isin(["YES", "NO"]), "NO_QUOTE"] = "NO"
+            worker_df["SUPPLIER"] = worker_df["SUPPLIER"].fillna("").astype(str).str.strip()
+            margin_worker_df = worker_df[
+                (worker_df["NO_QUOTE"] == "NO") &
+                (~worker_df["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"]))
+            ].copy()
+
             customer_refs = (
                 quotes_df["Customer ref NO"]
                 .dropna()
@@ -1078,18 +1453,18 @@ if role == "admin":
                 ].copy()
                 current_status = customer_quotes["STATUS"].astype(str).str.strip().str.upper().iloc[0]
                 if current_status == "DELETED":
-                    st.error("Quote is DELETED and cannot be finalized.")
+                    st.error("Quote is DELETED.")
                     st.stop()
-                if current_status == "SENT_TO_CLIENT":
-                    st.error("Quote already sent to client. Editing locked.")
+                if current_status == "COMPLETED":
+                    st.error("Quote is COMPLETED. Editing locked.")
                     st.stop()
 
                 selected_quote_id = customer_quotes["QUOTE_ID"].astype(str).str.strip().iloc[0]
                 total_parts = customer_quotes[
                     customer_quotes["QUOTE_ID"].astype(str).str.strip() == selected_quote_id
                 ]["PART NO"].astype(str).str.strip().nunique()
-                submitted_parts = worker_df[
-                    worker_df["QUOTE_ID"].astype(str).str.strip() == selected_quote_id
+                submitted_parts = margin_worker_df[
+                    margin_worker_df["QUOTE_ID"].astype(str).str.strip() == selected_quote_id
                 ]["PART NO"].astype(str).str.strip().nunique()
 
                 if submitted_parts < total_parts:
@@ -1098,7 +1473,7 @@ if role == "admin":
                         "Showing available submitted parts below."
                     )
 
-                subs_for_customer = worker_df.merge(
+                subs_for_customer = margin_worker_df.merge(
                     customer_quotes[["QUOTE_ID", "PART NO"]].drop_duplicates(),
                     on=["QUOTE_ID", "PART NO"],
                     how="inner"
@@ -1124,7 +1499,7 @@ if role == "admin":
                     supplier_base["SUPPLIER"] = supplier_base["SUPPLIER"].astype(str).str.strip()
                     supplier_base["CONDITION"] = supplier_base["COND_AVAILABLE"].astype(str).str.strip()
                     supplier_base["LEAD TIME"] = supplier_base["LT"].astype(str).str.strip()
-                    supplier_base = supplier_base[["QUOTE_ID", "PART NO", "SUPPLIER", "PRICE", "CONDITION", "LEAD TIME"]]
+                    supplier_base = supplier_base[["SUBMISSION_ID", "QUOTE_ID", "PART NO", "SUPPLIER", "SUPPLIER_COUNTRY", "PRICE", "CONDITION", "LEAD TIME"]]
 
                     margin_grid = part_base.merge(
                         supplier_base,
@@ -1133,20 +1508,17 @@ if role == "admin":
                     )
 
                     if not final_quotes_df.empty:
-                        if "SUPPLIER" not in final_quotes_df.columns:
-                            final_quotes_df["SUPPLIER"] = ""
+                        if "SELECTED_SUBMISSION_ID" not in final_quotes_df.columns:
+                            final_quotes_df["SELECTED_SUBMISSION_ID"] = ""
                         final_existing = final_quotes_df[[
-                            "QUOTE_ID",
-                            "PART NO",
-                            "SUPPLIER",
+                            "SELECTED_SUBMISSION_ID",
                             "MARGIN_PERCENT"
                         ]].copy()
-                        final_existing["QUOTE_ID"] = final_existing["QUOTE_ID"].astype(str).str.strip()
-                        final_existing["PART NO"] = final_existing["PART NO"].astype(str).str.strip()
-                        final_existing["SUPPLIER"] = final_existing["SUPPLIER"].astype(str).str.strip()
+                        final_existing.rename(columns={"SELECTED_SUBMISSION_ID": "SUBMISSION_ID"}, inplace=True)
+                        final_existing["SUBMISSION_ID"] = final_existing["SUBMISSION_ID"].astype(str).str.strip()
                         margin_grid = margin_grid.merge(
                             final_existing,
-                            on=["QUOTE_ID", "PART NO", "SUPPLIER"],
+                            on=["SUBMISSION_ID"],
                             how="left"
                         )
                     else:
@@ -1160,6 +1532,11 @@ if role == "admin":
                     margin_grid["FINAL_TOTAL"] = margin_grid["FINAL_UNIT_PRICE"] * margin_grid["QTY"]
                     margin_grid["SELECT"] = True
 
+                    # Rename for UI display clarity (CSV schema unchanged)
+                    margin_grid = margin_grid.rename(columns={
+                        "DUE DATE": "Customer Due Date",
+                    })
+
                     st.subheader("Internal Quote Summary")
                     edit_cols = [
                         "SELECT",
@@ -1168,16 +1545,19 @@ if role == "admin":
                         "PART NO",
                         "DESCRIPTION",
                         "QTY",
+                        "Customer Due Date",
                         "SUPPLIER",
+                        "SUPPLIER_COUNTRY",
                         "CONDITION",
                         "LEAD TIME",
                         "PRICE",
                         "TOTAL PRICE",
                         "MARGIN_PERCENT",
                         "FINAL_UNIT_PRICE",
-                        "FINAL_TOTAL",
-                        "DUE DATE"
+                        "FINAL_TOTAL"
                     ]
+                    assert len(edit_cols) == len(set(edit_cols)), "Duplicate column names detected in edit_cols"
+
                     st.caption("Select suppliers and edit margin. Final prices update from margin values.")
                     edited_margin_grid = st.data_editor(
                         margin_grid[edit_cols],
@@ -1191,13 +1571,14 @@ if role == "admin":
                             "DESCRIPTION",
                             "QTY",
                             "SUPPLIER",
+                            "SUPPLIER_COUNTRY",
                             "CONDITION",
                             "LEAD TIME",
                             "PRICE",
                             "TOTAL PRICE",
                             "FINAL_UNIT_PRICE",
                             "FINAL_TOTAL",
-                            "DUE DATE"
+                            "Customer Due Date"
                         ]
                     )
 
@@ -1244,155 +1625,73 @@ if role == "admin":
                         (edited_margin_grid["SELECT"] == True) & valid_supplier_mask
                     ]
                     if selected_preview.empty:
-                        st.info("No suppliers selected. Nothing will be saved or finalized.")
+                        st.info("No suppliers selected. Nothing will be saved.")
                     else:
                         st.dataframe(
                             selected_preview[preview_columns],
                             use_container_width=True
                         )
 
-                    col_save, col_finalize = st.columns(2)
+                    if st.button("Save Draft", key="save_draft_margin"):
+                        final_quotes_df = read_csv(FINAL_QUOTES_PATH)
 
-                    with col_save:
-                        if st.button("Save Draft", key="save_draft_margin"):
-                            final_quotes_df = read_csv(FINAL_QUOTES_PATH)
+                        if final_quotes_df.empty:
+                            final_quotes_df = pd.DataFrame(columns=FINAL_QUOTES_COLUMNS)
+                        else:
+                            if "SUPPLIER" not in final_quotes_df.columns:
+                                final_quotes_df["SUPPLIER"] = ""
+                            final_quotes_df["QUOTE_ID"] = final_quotes_df["QUOTE_ID"].astype(str).str.strip()
+                            final_quotes_df["PART NO"] = final_quotes_df["PART NO"].astype(str).str.strip()
+                            final_quotes_df["SUPPLIER"] = final_quotes_df["SUPPLIER"].astype(str).str.strip()
 
-                            if final_quotes_df.empty:
-                                final_quotes_df = pd.DataFrame(columns=FINAL_QUOTES_COLUMNS)
-                            else:
-                                if "SUPPLIER" not in final_quotes_df.columns:
-                                    final_quotes_df["SUPPLIER"] = ""
-                                final_quotes_df["QUOTE_ID"] = final_quotes_df["QUOTE_ID"].astype(str).str.strip()
-                                final_quotes_df["PART NO"] = final_quotes_df["PART NO"].astype(str).str.strip()
-                                final_quotes_df["SUPPLIER"] = final_quotes_df["SUPPLIER"].astype(str).str.strip()
+                        edited_margin_grid["SELECT"] = (
+                            edited_margin_grid["SELECT"]
+                            .fillna(False)
+                            .apply(lambda x: x if isinstance(x, bool) else str(x).strip().lower() == "true")
+                        )
+                        valid_supplier_mask = ~edited_margin_grid["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
+                        selected_rows = edited_margin_grid[
+                            (edited_margin_grid["SELECT"] == True) & valid_supplier_mask
+                        ]
 
-                            edited_margin_grid["SELECT"] = (
-                                edited_margin_grid["SELECT"]
-                                .fillna(False)
-                                .apply(lambda x: x if isinstance(x, bool) else str(x).strip().lower() == "true")
-                            )
-                            valid_supplier_mask = ~edited_margin_grid["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
-                            selected_rows = edited_margin_grid[
-                                (edited_margin_grid["SELECT"] == True) & valid_supplier_mask
-                            ]
+                        # Remove previous draft rows for this quote
+                        final_quotes_df = final_quotes_df[
+                            final_quotes_df["QUOTE_ID"].astype(str).str.strip() != str(selected_quote_id).strip()
+                        ]
 
-                            # Remove previous draft rows for this quote
-                            final_quotes_df = final_quotes_df[
-                                final_quotes_df["QUOTE_ID"].astype(str).str.strip() != str(selected_quote_id).strip()
-                            ]
+                        for idx, row in selected_rows.iterrows():
+                            # Retrieve SUBMISSION_ID from the original margin_grid using index
+                            internal_sub_id = str(margin_grid.loc[idx, "SUBMISSION_ID"]).strip()
+                            record = {
+                                "QUOTE_ID": str(row["QUOTE_ID"]).strip(),
+                                "PART NO": str(row["PART NO"]).strip(),
+                                "SUPPLIER": str(row["SUPPLIER"]).strip(),
+                                "PRICE": float(row["PRICE"]),
+                                "MARGIN_PERCENT": float(row["MARGIN_PERCENT"]),
+                                "FINAL_UNIT_PRICE": float(row["FINAL_UNIT_PRICE"]),
+                                "FINAL_TOTAL": float(row["FINAL_TOTAL"]),
+                                "SELECTED_SUBMISSION_ID": internal_sub_id,
+                                "GENERATED_DATE": datetime.now().strftime("%Y-%m-%d"),
+                            }
 
-                            for _, row in selected_rows.iterrows():
-                                record = {
-                                    "QUOTE_ID": str(row["QUOTE_ID"]).strip(),
-                                    "PART NO": str(row["PART NO"]).strip(),
-                                    "SUPPLIER": str(row["SUPPLIER"]).strip(),
-                                    "PRICE": float(row["PRICE"]),
-                                    "MARGIN_PERCENT": float(row["MARGIN_PERCENT"]),
-                                    "FINAL_UNIT_PRICE": float(row["FINAL_UNIT_PRICE"]),
-                                    "FINAL_TOTAL": float(row["FINAL_TOTAL"]),
-                                    "GENERATED_DATE": datetime.now().strftime("%Y-%m-%d"),
-                                }
-
-                                final_quotes_df = pd.concat(
-                                    [final_quotes_df, pd.DataFrame([record])],
-                                    ignore_index=True
-                                )
-
-                            final_quotes_df = enforce_schema(
-                                final_quotes_df,
-                                FINAL_QUOTES_COLUMNS
+                            final_quotes_df = pd.concat(
+                                [final_quotes_df, pd.DataFrame([record])],
+                                ignore_index=True
                             )
 
-                            final_quotes_df.to_csv(
-                                FINAL_QUOTES_PATH,
-                                index=False,
-                                quoting=csv.QUOTE_ALL
-                            )
+                        final_quotes_df = enforce_schema(
+                            final_quotes_df,
+                            FINAL_QUOTES_COLUMNS
+                        )
 
-                            st.success("Draft saved successfully.")
+                        final_quotes_df.to_csv(
+                            FINAL_QUOTES_PATH,
+                            index=False,
+                            quoting=csv.QUOTE_ALL
+                        )
 
-                    with col_finalize:
-                        if st.button("Finalize Quote", key="finalize_margin_quote"):
-                            final_df_check = read_csv(FINAL_QUOTES_PATH)
-                            if final_df_check.empty:
-                                has_rows = False
-                            else:
-                                final_df_check["QUOTE_ID"] = final_df_check["QUOTE_ID"].astype(str).str.strip()
-                                has_rows = not final_df_check[
-                                    final_df_check["QUOTE_ID"] == str(selected_quote_id).strip()
-                                ].empty
-
-                            if not has_rows:
-                                st.error("Cannot finalize. No selected supplier rows saved.")
-                                st.stop()
-
-                            edited_margin_grid["SELECT"] = (
-                                edited_margin_grid["SELECT"]
-                                .fillna(False)
-                                .apply(lambda x: x if isinstance(x, bool) else str(x).strip().lower() == "true")
-                            )
-                            valid_supplier_mask = ~edited_margin_grid["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
-                            current_selected = edited_margin_grid[
-                                (edited_margin_grid["SELECT"] == True) & valid_supplier_mask
-                            ].copy()
-
-                            compare_cols = [
-                                "QUOTE_ID",
-                                "PART NO",
-                                "SUPPLIER",
-                                "PRICE",
-                                "MARGIN_PERCENT",
-                                "FINAL_UNIT_PRICE",
-                                "FINAL_TOTAL",
-                            ]
-                            key_cols = ["QUOTE_ID", "PART NO", "SUPPLIER"]
-                            num_cols = ["PRICE", "MARGIN_PERCENT", "FINAL_UNIT_PRICE", "FINAL_TOTAL"]
-
-                            current_compare = current_selected[compare_cols].copy() if not current_selected.empty else pd.DataFrame(columns=compare_cols)
-                            for col in key_cols:
-                                current_compare[col] = current_compare[col].astype(str).str.strip()
-                            for col in num_cols:
-                                current_compare[col] = pd.to_numeric(current_compare[col], errors="coerce").fillna(0.0).round(6)
-                            current_compare = current_compare.sort_values(by=compare_cols).reset_index(drop=True)
-
-                            saved_rows = final_df_check[
-                                final_df_check["QUOTE_ID"].astype(str).str.strip() == str(selected_quote_id).strip()
-                            ].copy()
-                            if "SUPPLIER" not in saved_rows.columns:
-                                saved_rows["SUPPLIER"] = ""
-                            for col in compare_cols:
-                                if col not in saved_rows.columns:
-                                    saved_rows[col] = None
-                            saved_compare = saved_rows[compare_cols].copy()
-                            for col in key_cols:
-                                saved_compare[col] = saved_compare[col].astype(str).str.strip()
-                            for col in num_cols:
-                                saved_compare[col] = pd.to_numeric(saved_compare[col], errors="coerce").fillna(0.0).round(6)
-                            saved_compare = saved_compare.sort_values(by=compare_cols).reset_index(drop=True)
-
-                            if not current_compare.equals(saved_compare):
-                                st.error("Unsaved changes detected. Please Save Draft first.")
-                                st.stop()
-
-                            quotes_df = read_csv(QUOTES_PATH)
-
-                            ref_mask = (
-                                quotes_df["Customer ref NO"]
-                                .astype(str)
-                                .str.strip()
-                                == str(sel_ref).strip()
-                            )
-
-                            quotes_df.loc[ref_mask, "STATUS"] = "FINALIZED"
-
-                            quotes_df.to_csv(
-                                QUOTES_PATH,
-                                index=False,
-                                quoting=csv.QUOTE_ALL
-                            )
-
-                            st.success("Quote finalized successfully.")
-                            st.rerun()
+                        st.success("Draft saved successfully.")
+                        st.rerun()
                     summary_df = edited_margin_grid[
                         [
                             "Customer ref NO",
@@ -1407,7 +1706,7 @@ if role == "admin":
                             "MARGIN_PERCENT",
                             "FINAL_UNIT_PRICE",
                             "FINAL_TOTAL",
-                            "DUE DATE"
+                            "Customer Due Date"
                         ]
                     ].rename(columns={"Customer ref NO": "REF NO"})
                     safe_ref = str(sel_ref).replace(" ", "_").replace("/", "-")
@@ -1420,9 +1719,9 @@ if role == "admin":
                         if not saved_final_df.empty:
                             saved_final_df["QUOTE_ID"] = saved_final_df["QUOTE_ID"].astype(str).str.strip()
                             saved_final_df["PART NO"] = saved_final_df["PART NO"].astype(str).str.strip()
-                            if "SUPPLIER" not in saved_final_df.columns:
-                                saved_final_df["SUPPLIER"] = ""
-                            saved_final_df["SUPPLIER"] = saved_final_df["SUPPLIER"].astype(str).str.strip()
+                            if "SELECTED_SUBMISSION_ID" not in saved_final_df.columns:
+                                saved_final_df["SELECTED_SUBMISSION_ID"] = ""
+                            saved_final_df["SELECTED_SUBMISSION_ID"] = saved_final_df["SELECTED_SUBMISSION_ID"].astype(str).str.strip()
 
                             selected_quote_ids = customer_quotes["QUOTE_ID"].astype(str).str.strip().unique().tolist()
                             saved_final_df = saved_final_df[
@@ -1433,15 +1732,13 @@ if role == "admin":
                             if not cert_df.empty and "CERTIFICATE_FILE" in cert_df.columns:
                                 cert_df["QUOTE_ID"] = cert_df["QUOTE_ID"].astype(str).str.strip()
                                 cert_df["PART NO"] = cert_df["PART NO"].astype(str).str.strip()
-                                cert_df["SUPPLIER"] = cert_df["SUPPLIER"].astype(str).str.strip()
+                                cert_df["SUBMISSION_ID"] = cert_df["SUBMISSION_ID"].astype(str).str.strip()
                                 cert_df["CERTIFICATE_FILE"] = cert_df["CERTIFICATE_FILE"].fillna("").astype(str).str.strip()
 
                                 added_files = set()
                                 for _, frow in saved_final_df.iterrows():
                                     match = cert_df[
-                                        (cert_df["QUOTE_ID"] == str(frow["QUOTE_ID"]).strip()) &
-                                        (cert_df["PART NO"] == str(frow["PART NO"]).strip()) &
-                                        (cert_df["SUPPLIER"] == str(frow["SUPPLIER"]).strip())
+                                        (cert_df["SUBMISSION_ID"] == str(frow.get("SELECTED_SUBMISSION_ID", "")).strip())
                                     ]
                                     if match.empty:
                                         continue
@@ -1490,14 +1787,15 @@ if role == "admin":
             for df in [final_df, worker_df, quotes_df]:
                 df["QUOTE_ID"] = df["QUOTE_ID"].astype(str).str.strip()
                 df["PART NO"] = df["PART NO"].astype(str).str.strip()
-            if "SUPPLIER" not in final_df.columns:
-                final_df["SUPPLIER"] = ""
-            final_df["SUPPLIER"] = final_df["SUPPLIER"].astype(str).str.strip()
-            worker_df["SUPPLIER"] = worker_df["SUPPLIER"].astype(str).str.strip()
+            if "SELECTED_SUBMISSION_ID" not in final_df.columns:
+                final_df["SELECTED_SUBMISSION_ID"] = ""
+            final_df["SELECTED_SUBMISSION_ID"] = final_df["SELECTED_SUBMISSION_ID"].astype(str).str.strip()
+            worker_df["SUBMISSION_ID"] = worker_df["SUBMISSION_ID"].astype(str).str.strip()
 
+            worker_mod = worker_df.rename(columns={"SUBMISSION_ID": "SELECTED_SUBMISSION_ID"})
             merged_df = final_df.merge(
-                worker_df,
-                on=["QUOTE_ID", "PART NO", "SUPPLIER"],
+                worker_mod,
+                on=["SELECTED_SUBMISSION_ID", "QUOTE_ID", "PART NO"],
                 how="left"
             )
             merged_df = merged_df.merge(
@@ -1520,69 +1818,149 @@ if role == "admin":
                 if merged_df.empty:
                     st.info("No rows found for selected Customer Ref.")
                 else:
-                    client_df = merged_df[[
-                        "Customer ref NO",
+                    # Initialize SELECT column
+                    merged_df["SELECT"] = True
+                    
+                    st.subheader("Select Parts to Include in Export")
+                    st.caption("Only selected parts will be included in the Excel and ZIP export.")
+                    
+                    # Define columns to show in the editor for admin selection
+                    display_editor_cols = [
+                        "SELECT",
+                        "CUSTOMER ID",
+                        "QUOTE_ID",
                         "PART NO",
                         "DESCRIPTION",
                         "QTY",
+                        "SUPPLIER",
                         "FINAL_UNIT_PRICE",
                         "FINAL_TOTAL",
                         "COND_AVAILABLE",
-                        "LT",
-                        "CERTIFICATE_TYPE",
-                        "CERTIFICATE_FILE"
-                    ]].rename(columns={
-                        "Customer ref NO": "REF NO",
-                        "FINAL_UNIT_PRICE": "UNIT PRICE",
-                        "FINAL_TOTAL": "TOTAL PRICE",
-                        "COND_AVAILABLE": "CONDITION",
-                        "LT": "LEAD TIME (DAYS)",
-                        "CERTIFICATE_TYPE": "CERTIFICATE TYPE"
-                    })
+                        "LT"
+                    ]
+                    
+                    # Handle missing columns if any
+                    for col in display_editor_cols:
+                        if col not in merged_df.columns:
+                            merged_df[col] = ""
 
-                    st.dataframe(client_df, width='stretch')
-                    excel_data = to_excel_bytes(client_df)
-                    safe_ref = str(sel_ref).replace(" ", "_").replace("/", "-")
-                    zip_buffer = io.BytesIO()
-                    with zipfile.ZipFile(zip_buffer, "w") as zf:
-                        zf.writestr("client_quote.xlsx", excel_data)
-
-                        selected_quote_ids = merged_df["QUOTE_ID"].astype(str).str.strip().unique().tolist()
-                        final_rows_for_ref = final_df[
-                            final_df["QUOTE_ID"].astype(str).str.strip().isin(selected_quote_ids)
-                        ].copy()
-                        if not final_rows_for_ref.empty and "CERTIFICATE_FILE" in worker_df.columns:
-                            worker_df["CERTIFICATE_FILE"] = worker_df["CERTIFICATE_FILE"].fillna("").astype(str).str.strip()
-                            added_files = set()
-                            for _, frow in final_rows_for_ref.iterrows():
-                                match = worker_df[
-                                    (worker_df["QUOTE_ID"] == str(frow["QUOTE_ID"]).strip()) &
-                                    (worker_df["PART NO"] == str(frow["PART NO"]).strip()) &
-                                    (worker_df["SUPPLIER"] == str(frow["SUPPLIER"]).strip())
-                                ]
-                                if match.empty:
-                                    continue
-                                cert_file = str(match.iloc[0].get("CERTIFICATE_FILE", "")).strip()
-                                if not cert_file or cert_file in added_files:
-                                    continue
-                                cert_path = CERTIFICATE_DIR / cert_file
-                                if cert_path.exists():
-                                    zf.write(cert_path, arcname=f"certificates/{cert_file}")
-                                    added_files.add(cert_file)
-
-                    st.download_button(
-                        "Download Client Quote",
-                        zip_buffer.getvalue(),
-                        f"client_quote_{safe_ref}.zip",
-                        "application/zip"
+                    edited_export_grid = st.data_editor(
+                        merged_df[display_editor_cols],
+                        use_container_width=True,
+                        num_rows="fixed",
+                        disabled=[c for c in display_editor_cols if c != "SELECT"],
+                        key=f"client_export_editor_{sel_ref}"
                     )
-                    if st.button("Mark as SENT_TO_CLIENT", key="mark_sent_to_client"):
-                        quotes_df = read_csv(QUOTES_PATH)
-                        ref_mask = quotes_df["Customer ref NO"].astype(str).str.strip() == str(sel_ref).strip()
-                        quotes_df.loc[ref_mask, "STATUS"] = "SENT_TO_CLIENT"
-                        quotes_df.to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
-                        st.success("Quote marked as SENT_TO_CLIENT.")
-                        st.rerun()
+                    
+                    # Filter based on admin selection
+                    selected_export_df = merged_df.loc[edited_export_grid.index[edited_export_grid["SELECT"] == True]].copy()
+
+                    if selected_export_df.empty:
+                        st.warning("No parts selected for export.")
+                    else:
+                        # Validate ONLY selected parts
+                        missing_selection = selected_export_df[
+                            selected_export_df["SELECTED_SUBMISSION_ID"].isna() |
+                            (selected_export_df["SELECTED_SUBMISSION_ID"].astype(str).str.strip() == "") |
+                            (selected_export_df["SELECTED_SUBMISSION_ID"].astype(str).str.strip().str.lower() == "nan")
+                        ]
+
+                        if not missing_selection.empty:
+                            st.error(
+                                "Some selected parts do not have a selected supplier. Please complete margin selection before exporting."
+                            )
+                            st.stop()
+
+                        client_df = selected_export_df[[
+                            "CUSTOMER ID",
+                            "Customer ref NO",
+                            "PART NO",
+                            "DESCRIPTION",
+                            "QTY",
+                            "FINAL_UNIT_PRICE",
+                            "FINAL_TOTAL",
+                            "COND_AVAILABLE",
+                            "LT",
+                            "CERTIFICATE_TYPE",
+                            "CERTIFICATE_FILE"
+                        ]].rename(columns={
+                            "CUSTOMER ID": "CUSTOMER ID",  
+                            "Customer ref NO": "REF NO",
+                            "FINAL_UNIT_PRICE": "UNIT PRICE",
+                            "FINAL_TOTAL": "TOTAL PRICE",
+                            "COND_AVAILABLE": "CONDITION",
+                            "LT": "LEAD TIME (DAYS)",
+                            "CERTIFICATE_TYPE": "CERTIFICATE TYPE"
+                        })
+
+                        st.dataframe(client_df, width='stretch')
+
+                        client_export_df = client_df.copy()
+                        export_price_cols = [
+                            "PRICE",
+                            "FINAL_PRICE",
+                            "FINAL_TOTAL",
+                            "FINAL_UNIT_PRICE",
+                            "UNIT PRICE",
+                            "TOTAL PRICE",
+                        ]
+                        for price_col in export_price_cols:
+                            if price_col in client_export_df.columns:
+                                client_export_df[price_col] = client_export_df[price_col].apply(
+                                    lambda x: x
+                                    if pd.isna(x) or str(x).strip() == ""
+                                    else (str(x) if str(x).strip().startswith("$") else f"${x}")
+                                )
+
+                        excel_data = to_excel_bytes(client_export_df)
+                        safe_ref = str(sel_ref).replace(" ", "_").replace("/", "-")
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w") as zf:
+                            zf.writestr("client_quote.xlsx", excel_data)
+
+                            selected_quote_ids = selected_export_df["QUOTE_ID"].astype(str).str.strip().unique().tolist()
+                            final_rows_for_ref = final_df[
+                                final_df["QUOTE_ID"].astype(str).str.strip().isin(selected_quote_ids)
+                            ].copy()
+                            if not final_rows_for_ref.empty and "CERTIFICATE_FILE" in worker_df.columns:
+                                worker_df["CERTIFICATE_FILE"] = worker_df["CERTIFICATE_FILE"].fillna("").astype(str).str.strip()
+                                added_files = set()
+                                for _, frow in final_rows_for_ref.iterrows():
+                                    match = worker_df[
+                                        (worker_df["SUBMISSION_ID"] == str(frow.get("SELECTED_SUBMISSION_ID", "")).strip())
+                                    ]
+                                    if match.empty:
+                                        continue
+                                    cert_file = str(match.iloc[0].get("CERTIFICATE_FILE", "")).strip()
+                                    if not cert_file or cert_file in added_files:
+                                        continue
+                                    cert_path = CERTIFICATE_DIR / cert_file
+                                    if cert_path.exists():
+                                        zf.write(cert_path, arcname=f"certificates/{cert_file}")
+                                        added_files.add(cert_file)
+
+                        st.download_button(
+                            "Download Client Quote ZIP",
+                            zip_buffer.getvalue(),
+                            f"client_quote_{safe_ref}.zip",
+                            "application/zip"
+                        )
+                        confirm_send = st.checkbox(
+                            "Confirm RFQ is finished",
+                            key="confirm_send_to_client"
+                        )
+
+                        if st.button("Mark RFQ Completed", key="mark_sent_to_client"):
+                            if not confirm_send:
+                                st.warning("Please confirm before marking the quote as finished.")
+                                st.stop()
+
+                            quotes_df = read_csv(QUOTES_PATH)
+                            ref_mask = quotes_df["Customer ref NO"].astype(str).str.strip() == str(sel_ref).strip()
+                            quotes_df.loc[ref_mask, "STATUS"] = "COMPLETED"
+                            quotes_df.to_csv(QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                            st.success("RFQ marked as COMPLETED and archived.")
+                            st.rerun()
 
 
 else:
@@ -1594,7 +1972,7 @@ else:
     # WORKER TAB 1 - Assigned Parts
     # -----------------------
     with tabs[0]:
-        st.header("My Assigned Parts")
+        st.header("Assigned (Pending)")
         assignments_df = read_csv(ASSIGNMENTS_PATH)
         quotes_df = read_csv(QUOTES_PATH)
 
@@ -1625,11 +2003,56 @@ else:
             on=["QUOTE_ID"],
             how="left"
         )
+        pending_tasks = my_tasks.copy()
         if my_tasks.empty:
+            pending_tasks = pd.DataFrame(columns=["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "QTY", "MEASURE_UNIT", "WORKER_DUE_DATE"])
             st.info("No parts assigned to you yet.")
         else:
-            if "MEASURE_UNIT" not in my_tasks.columns:
-                my_tasks["MEASURE_UNIT"] = "EA"
+
+            worker_submissions_df = read_csv(WORKER_QUOTES_PATH)
+            if not worker_submissions_df.empty:
+                worker_submissions_df = enforce_schema(worker_submissions_df, WORKER_QUOTES_COLUMNS)
+                worker_submissions_df["QUOTE_ID"] = worker_submissions_df["QUOTE_ID"].astype(str).str.strip()
+                worker_submissions_df["PART NO"] = worker_submissions_df["PART NO"].astype(str).str.strip()
+                worker_submissions_df["WORKER_ID"] = worker_submissions_df["WORKER_ID"].astype(str).str.strip()
+                worker_submissions_df["SUPPLIER"] = worker_submissions_df["SUPPLIER"].fillna("").astype(str).str.strip()
+                worker_submissions_df["EDIT_REQUIRED"] = worker_submissions_df["EDIT_REQUIRED"].fillna("").astype(str).str.strip().str.upper()
+                worker_submissions_df["NO_QUOTE"] = worker_submissions_df["NO_QUOTE"].fillna("").astype(str).str.strip().str.upper()
+                worker_submissions_df.loc[~worker_submissions_df["EDIT_REQUIRED"].isin(["YES", "NO"]), "EDIT_REQUIRED"] = "NO"
+                worker_submissions_df.loc[~worker_submissions_df["NO_QUOTE"].isin(["YES", "NO"]), "NO_QUOTE"] = "NO"
+
+                worker_submissions_df = worker_submissions_df[
+                    worker_submissions_df["WORKER_ID"] == str(user_id).strip()
+                ].copy()
+
+                has_supplier_quote = (
+                    (worker_submissions_df["NO_QUOTE"] == "NO") &
+                    (~worker_submissions_df["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"]))
+                )
+                # Allow multiple supplier submissions. Exclude if NO_QUOTE == "YES" or EDIT_REQUIRED == "YES".
+                completed_mask = (
+                    (worker_submissions_df["NO_QUOTE"] == "YES") |
+                    (worker_submissions_df["EDIT_REQUIRED"] == "YES")
+                )
+                completed_keys = set(
+                    zip(
+                        worker_submissions_df.loc[completed_mask, "QUOTE_ID"].astype(str).str.strip(),
+                        worker_submissions_df.loc[completed_mask, "PART NO"].astype(str).str.strip(),
+                    )
+                )
+                if completed_keys:
+                    pending_tasks = my_tasks[
+                        ~my_tasks.apply(
+                            lambda row: (
+                                clean_text(row["QUOTE_ID"]),
+                                clean_text(row["PART NO"])
+                            ) in completed_keys,
+                            axis=1
+                        )
+                    ].copy()
+
+            if "MEASURE_UNIT" not in pending_tasks.columns:
+                pending_tasks["MEASURE_UNIT"] = "EA"
 
             display_columns = [
                 "QUOTE_ID",
@@ -1640,51 +2063,157 @@ else:
                 "MEASURE_UNIT",
                 "WORKER_DUE_DATE"
             ]
-            assigned_parts_view = my_tasks[display_columns]
-            filtered_assigned_parts_view = apply_assigned_parts_filters(
-                assigned_parts_view,
-                "worker_assigned_parts"
-            )
-            st.dataframe(filtered_assigned_parts_view, width='stretch')
-            render_export_button(
-                "Export Assigned Parts Excel",
-                filtered_assigned_parts_view,
-                f"assigned_parts_{username}.xlsx"
-            )
+            if pending_tasks.empty:
+                st.info("No pending parts in your work queue.")
+            else:
+                assigned_parts_view = pending_tasks[display_columns]
+                filtered_assigned_parts_view = apply_assigned_parts_filters(
+                    assigned_parts_view,
+                    "worker_assigned_parts"
+                )
+                st.dataframe(filtered_assigned_parts_view, width='stretch')
+                render_export_button(
+                    "Export Assigned Parts Excel",
+                    filtered_assigned_parts_view,
+                    f"assigned_parts_{username}.xlsx"
+                )
 
     # -----------------------
     # WORKER TAB 2 - Submit Supplier Info
     # -----------------------
     with tabs[1]:
         st.header("Submit Supplier Info")
-        if not my_tasks.empty:
-            pending_tasks_export = my_tasks[["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "QTY", "WORKER_DUE_DATE"]].copy()
+        if not pending_tasks.empty:
+            pending_tasks_export = pending_tasks[["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "QTY", "WORKER_DUE_DATE"]].copy()
             render_export_button(
                 "Export My Pending Assigned Tasks Excel",
                 pending_tasks_export,
                 f"my_pending_tasks_{username}.xlsx"
             )
-        
-        if not my_tasks.empty:
-            # We need QUOTE_ID + PART NO to identify the task uniquely
-            task_options = my_tasks.apply(lambda x: f"{x['QUOTE_ID']} - {x['PART NO']}", axis=1).tolist()
-            selected_task = st.selectbox("Select Assigned Task", task_options)
-            
-            # Extract ID and Part
-            sel_quote_id = selected_task.split(" - ")[0]
-            sel_part_no = selected_task.split(" - ")[1]
-            
+
+        if not pending_tasks.empty:
+            my_tasks_norm = pending_tasks.copy()
+            for col in ["QUOTE_ID", "PART NO", "DESCRIPTION", "Customer ref NO"]:
+                if col not in my_tasks_norm.columns:
+                    my_tasks_norm[col] = ""
+                my_tasks_norm[col] = my_tasks_norm[col].fillna("").astype(str).str.strip()
+            task_option_map = {}
+            for _, row in my_tasks_norm.iterrows():
+                base_label = f"{row['PART NO']} | {row['DESCRIPTION']}"
+                label = make_unique_label(
+                    base_label,
+                    [row["QUOTE_ID"], row["Customer ref NO"]],
+                    set(task_option_map.keys())
+                )
+                task_option_map[label] = (row["QUOTE_ID"], row["PART NO"])
+
+            selected_task_display = st.selectbox(
+                "Select Assigned Task",
+                list(task_option_map.keys())
+            )
+            sel_quote_id, sel_part_no = task_option_map[selected_task_display]
+            selected_key = (str(sel_quote_id).strip(), str(sel_part_no).strip())
+
+            valid_keys_from_quotes = set()
+            if not quotes_df.empty:
+                valid_keys_from_quotes = {
+                    (clean_text(row["QUOTE_ID"]), clean_text(row["PART NO"]))
+                    for _, row in quotes_df[["QUOTE_ID", "PART NO"]].drop_duplicates().iterrows()
+                }
+            valid_keys_from_tasks = {
+                (clean_text(row["QUOTE_ID"]), clean_text(row["PART NO"]))
+                for _, row in my_tasks_norm[["QUOTE_ID", "PART NO"]].drop_duplicates().iterrows()
+            }
+
+            # Guard: Block submissions if RFQ is COMPLETED
+            if not quotes_df.empty:
+                q_mask_comp = quotes_df["QUOTE_ID"].astype(str).str.strip() == str(sel_quote_id).strip()
+                if any(q_mask_comp):
+                    q_status_comp = quotes_df[q_mask_comp]["STATUS"].astype(str).str.strip().str.upper().iloc[0]
+                    if q_status_comp == "COMPLETED":
+                        st.warning("This RFQ is completed and no longer accepts submissions.")
+                        st.stop()
+
+            with st.expander("Mark as No Quote"):
+                no_quote_remark = st.text_area(
+                    "Reason for No Quote",
+                    key=f"no_quote_reason_{safe_filename_part(sel_quote_id)}_{safe_filename_part(sel_part_no)}",
+                    help="Explain why no supplier quote could be obtained."
+                )
+                if st.button("Confirm No Quote", key=f"mark_no_quote_{safe_filename_part(sel_quote_id)}_{safe_filename_part(sel_part_no)}"):
+                    if selected_key not in valid_keys_from_quotes or selected_key not in valid_keys_from_tasks:
+                        st.error("Invalid part selection detected.")
+                        st.stop()
+                    no_quote_remark = no_quote_remark.strip()
+                    if not no_quote_remark:
+                        st.error("Reason for No Quote is required.")
+                        st.stop()
+
+                    no_quote_df = read_csv(WORKER_QUOTES_PATH)
+                    no_quote_df = enforce_schema(no_quote_df, WORKER_QUOTES_COLUMNS)
+                    no_quote_df["QUOTE_ID"] = no_quote_df["QUOTE_ID"].astype(str).str.strip()
+                    no_quote_df["PART NO"] = no_quote_df["PART NO"].astype(str).str.strip()
+                    no_quote_df["SUPPLIER"] = no_quote_df["SUPPLIER"].fillna("").astype(str).str.strip()
+                    no_quote_df["WORKER_ID"] = no_quote_df["WORKER_ID"].astype(str).str.strip()
+
+                    existing_ids = no_quote_df["SUBMISSION_ID"].dropna().astype(str)
+                    valid_ids = [int(x.replace("SUB", "")) for x in existing_ids if x.startswith("SUB") and x.replace("SUB", "").isdigit()]
+                    next_id = max(valid_ids) + 1 if valid_ids else 1
+                    submission_id = f"SUB{next_id:04d}"
+                    
+                    no_quote_row = {
+                        "SUBMISSION_ID": submission_id,
+                        "QUOTE_ID": sel_quote_id,
+                        "PART NO": sel_part_no,
+                        "SUPPLIER": "",
+                        "SUPPLIER_COUNTRY": "",
+                        "SUPPLIER_SOURCE": "",
+                        "PRICE": None,
+                        "COND_AVAILABLE": "",
+                        "QTY_AVAILABLE": None,
+                        "LT": "",
+                        "CERTIFICATE_AVAILABLE": "NO",
+                        "CERTIFICATE_FILE": "",
+                        "CERTIFICATE_TYPE": "",
+                        "REMARKS": "NO QUOTE",
+                        "WORKER_ID": user_id,
+                        "SUBMITTED_DATE": datetime.now().strftime("%Y-%m-%d"),
+                        "EDIT_REQUIRED": "NO",
+                        "NO_QUOTE": "YES",
+                        "NO_QUOTE_REMARK": no_quote_remark,
+                    }
+
+                    no_quote_mask = (
+                        (no_quote_df["QUOTE_ID"] == str(sel_quote_id).strip()) &
+                        (no_quote_df["PART NO"] == str(sel_part_no).strip()) &
+                        (no_quote_df["SUPPLIER"] == "") &
+                        (no_quote_df["WORKER_ID"] == str(user_id).strip())
+                    )
+
+                    if no_quote_mask.any():
+                        for col, value in no_quote_row.items():
+                            no_quote_df.loc[no_quote_mask, col] = value
+                    else:
+                        no_quote_df = pd.concat([no_quote_df, pd.DataFrame([no_quote_row])], ignore_index=True)
+                        no_quote_df = enforce_schema(no_quote_df, WORKER_QUOTES_COLUMNS)
+
+                    no_quote_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                    st.success("Part marked as No Quote.")
+                    st.rerun()
+
             with st.form("submission_form"):
                 col1, col2 = st.columns(2)
                 with col1:
                     cost_price = st.number_input("PRICE", min_value=0.0, step=0.01)
                     cond_available = st.selectbox(
                         "COND AVAILABLE",
-                        ["NE", "NS", "OH", "SV", "AR","FN", "MOD"]
+                        ["NE", "NS", "OH", "SV", "AR","FN", "MOD","RP","IN"]
                     )
                     qty_available = st.number_input("QTY AVAILABLE", min_value=0, step=1)
                 with col2:
                     supplier = st.text_input("SUPPLIER")
+                    supplier_country = st.text_input("SUPPLIER COUNTRY")
+                    supplier_source = st.text_input("SUPPLIER SOURCE")
                     lt = st.text_input("LT (Lead Time)")
                     certificate_available = st.toggle("Certificate Available")
                     certificate_type = st.text_input("Certificate Type", key=f"cert_type_{user_id}_{sel_quote_id}_{sel_part_no}")
@@ -1696,20 +2225,34 @@ else:
                             key=f"cert_upload_{user_id}_{sel_quote_id}_{sel_part_no}"
                         )
                     remarks = st.text_area("REMARKS")
-                
+
                 submitted = st.form_submit_button("Submit Supplier Quote")
-                
+
                 if submitted:
+                    if selected_key not in valid_keys_from_quotes or selected_key not in valid_keys_from_tasks:
+                        st.error("Invalid part selection detected.")
+                        st.stop()
+
+                    supplier = supplier.strip()
                     if not supplier or cost_price <= 0:
                         st.error("Supplier and Cost Price are required.")
                     elif certificate_available and uploaded_cert is None:
                         st.error("Please upload certificate file.")
                         st.stop()
                     else:
+                        full_df_for_id = read_csv(WORKER_QUOTES_PATH)
+                        existing_ids = full_df_for_id["SUBMISSION_ID"].dropna().astype(str)
+                        valid_ids = [int(x.replace("SUB", "")) for x in existing_ids if x.startswith("SUB") and x.replace("SUB", "").isdigit()]
+                        next_id = max(valid_ids) + 1 if valid_ids else 1
+                        submission_id = f"SUB{next_id:04d}"
+                        
                         new_submission = {
+                            "SUBMISSION_ID": submission_id,
                             "QUOTE_ID": sel_quote_id,
                             "PART NO": sel_part_no,
                             "SUPPLIER": supplier,
+                            "SUPPLIER_COUNTRY": supplier_country,
+                            "SUPPLIER_SOURCE": supplier_source,
                             "PRICE": cost_price,
                             "COND_AVAILABLE": cond_available,
                             "QTY_AVAILABLE": qty_available,
@@ -1719,7 +2262,10 @@ else:
                             "CERTIFICATE_TYPE": certificate_type if certificate_available else "",
                             "REMARKS": remarks,
                             "WORKER_ID": user_id,
-                            "SUBMITTED_DATE": datetime.now().strftime("%Y-%m-%d")
+                            "SUBMITTED_DATE": datetime.now().strftime("%Y-%m-%d"),
+                            "EDIT_REQUIRED": "NO",
+                            "NO_QUOTE": "NO",
+                            "NO_QUOTE_REMARK": "",
                         }
 
                         if certificate_available and uploaded_cert is not None:
@@ -1730,15 +2276,41 @@ else:
                             cert_path = CERTIFICATE_DIR / cert_filename
                             cert_path.write_bytes(uploaded_cert.getbuffer())
                             new_submission["CERTIFICATE_FILE"] = cert_filename
-                        
-                        append_to_csv(WORKER_QUOTES_PATH, new_submission, WORKER_QUOTES_COLUMNS)
+
+                        worker_existing_df = read_csv(WORKER_QUOTES_PATH)
+                        if worker_existing_df.empty:
+                            existing_mask = pd.Series(dtype=bool)
+                        else:
+                            worker_existing_df = enforce_schema(worker_existing_df, WORKER_QUOTES_COLUMNS)
+                            worker_existing_df["QUOTE_ID"] = worker_existing_df["QUOTE_ID"].astype(str).str.strip()
+                            worker_existing_df["PART NO"] = worker_existing_df["PART NO"].astype(str).str.strip()
+                            worker_existing_df["SUPPLIER"] = worker_existing_df["SUPPLIER"].astype(str).str.strip()
+                            existing_mask = (
+                                (worker_existing_df["QUOTE_ID"] == str(sel_quote_id).strip()) &
+                                (worker_existing_df["PART NO"] == str(sel_part_no).strip()) &
+                                (worker_existing_df["SUPPLIER"] == str(supplier).strip())
+                            )
+
+                        if not worker_existing_df.empty and existing_mask.any():
+                            # Retain existing SUBMISSION_ID
+                            existing_sub_id = worker_existing_df.loc[existing_mask, "SUBMISSION_ID"].values[0]
+                            if str(existing_sub_id).strip():
+                                new_submission["SUBMISSION_ID"] = existing_sub_id
+                                
+                            for col, value in new_submission.items():
+                                worker_existing_df.loc[existing_mask, col] = value
+                            worker_existing_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                            st.success("Existing supplier quotation updated successfully.")
+                        else:
+                            append_to_csv(WORKER_QUOTES_PATH, new_submission, WORKER_QUOTES_COLUMNS)
+                            st.success("Supplier quotation submitted successfully.")
+
                         status_changed = update_quote_status_if_fully_submitted(sel_quote_id)
-                        st.success("Supplier quotation submitted successfully.")
                         if status_changed:
                             st.success("All parts submitted. Quote status updated to SUBMITTED.")
                         st.rerun()
         else:
-            st.info("No tasks assigned to submit info for.")
+            st.info("No pending parts in your work queue.")
 
     # -----------------------
     # WORKER TAB 3 - My Submissions
@@ -1752,53 +2324,439 @@ else:
         if worker_df.empty:
             st.info("No submissions yet.")
         else:
+            worker_df = enforce_schema(worker_df, WORKER_QUOTES_COLUMNS)
             worker_df["QUOTE_ID"] = worker_df["QUOTE_ID"].astype(str).str.strip()
             worker_df["PART NO"] = worker_df["PART NO"].astype(str).str.strip()
-            quotes_df["QUOTE_ID"] = quotes_df["QUOTE_ID"].astype(str).str.strip()
-            quotes_df["PART NO"] = quotes_df["PART NO"].astype(str).str.strip()
+            worker_df["SUPPLIER"] = worker_df["SUPPLIER"].fillna("").astype(str).str.strip()
+            worker_df["WORKER_ID"] = worker_df["WORKER_ID"].astype(str).str.strip()
+            worker_df["EDIT_REQUIRED"] = worker_df["EDIT_REQUIRED"].fillna("").astype(str).str.strip().str.upper()
+            worker_df["NO_QUOTE"] = worker_df["NO_QUOTE"].fillna("").astype(str).str.strip().str.upper()
+            worker_df.loc[~worker_df["EDIT_REQUIRED"].isin(["YES", "NO"]), "EDIT_REQUIRED"] = "NO"
+            worker_df.loc[~worker_df["NO_QUOTE"].isin(["YES", "NO"]), "NO_QUOTE"] = "NO"
+
+            if quotes_df.empty:
+                quote_meta = pd.DataFrame(columns=["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "STATUS"])
+            else:
+                quotes_df["QUOTE_ID"] = quotes_df["QUOTE_ID"].astype(str).str.strip()
+                quotes_df["PART NO"] = quotes_df["PART NO"].astype(str).str.strip()
+                quotes_df["STATUS"] = quotes_df["STATUS"].astype(str).str.strip().str.upper()
+                quote_meta = (
+                    quotes_df.sort_values("DATE")
+                    [["QUOTE_ID", "PART NO", "Customer ref NO", "DESCRIPTION", "STATUS"]]
+                    .drop_duplicates(subset=["QUOTE_ID", "PART NO"], keep="last")
+                )
 
             my_quotes = worker_df[
                 worker_df["WORKER_ID"].astype(str).str.strip() == str(user_id)
-            ]
+            ].copy()
 
             if my_quotes.empty:
                 st.info("No submissions yet.")
             else:
                 merged = my_quotes.merge(
-                    quotes_df,
+                    quote_meta,
                     on=["QUOTE_ID", "PART NO"],
                     how="left"
                 )
+                if "STATUS" not in merged.columns:
+                    merged["STATUS"] = ""
                 merged = merged[merged["STATUS"].astype(str).str.strip().str.upper() != "DELETED"]
-                if merged.empty:
-                    st.info("No submissions yet.")
-                    st.stop()
 
-                display_cols = [
-                    "Customer ref NO",
-                    "PART NO",
-                    "DESCRIPTION",
-                    "PRICE",
-                    "COND_AVAILABLE",
-                    "QTY_AVAILABLE",
-                    "LT",
-                    "SUBMITTED_DATE"
-                ]
+                submitted_subtab, reassigned_subtab, no_quote_subtab = st.tabs(["Submitted", "Re-Assigned", "No Quote"])
 
-                my_submissions_view = merged[display_cols].rename(columns={
-                    "Customer ref NO": "REF NO",
-                    "COND_AVAILABLE": "CONDITION",
-                    "LT": "LEAD TIME",
-                    "SUBMITTED_DATE": "SUBMITTED DATE"
-                })
+                with submitted_subtab:
+                    submitted_supplier_mask = ~merged["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
+                    submitted_merged = merged[
+                        (merged["NO_QUOTE"] == "NO") &
+                        (merged["EDIT_REQUIRED"] == "NO") &
+                        submitted_supplier_mask
+                    ].copy()
 
-                filtered_my_submissions_view = apply_my_submissions_filters(
-                    my_submissions_view,
-                    "worker_my_submissions"
-                )
-                st.dataframe(filtered_my_submissions_view, width='stretch')
-                render_export_button(
-                    "Export My Submissions Excel",
-                    filtered_my_submissions_view,
-                    f"my_submissions_{username}.xlsx"
-                )
+                    # Final safety guard
+                    submitted_merged = submitted_merged.drop_duplicates(subset=["QUOTE_ID", "PART NO", "SUPPLIER"])
+
+                    if submitted_merged.empty:
+                        st.info("No submitted supplier quotes yet.")
+                    else:
+                        display_cols = [
+                            "Customer ref NO",
+                            "PART NO",
+                            "DESCRIPTION",
+                            "SUPPLIER",
+                            "SUPPLIER_COUNTRY",
+                            "SUPPLIER_SOURCE",
+                            "PRICE",
+                            "COND_AVAILABLE",
+                            "QTY_AVAILABLE",
+                            "LT",
+                            "CERTIFICATE_AVAILABLE",
+                            "CERTIFICATE_TYPE",
+                            "SUBMITTED_DATE",
+                        ]
+
+                        my_submissions_view = submitted_merged[display_cols].copy()
+                        # Keep filter helper compatibility without changing displayed columns.
+                        my_submissions_view["REF NO"] = my_submissions_view["Customer ref NO"]
+                        my_submissions_view["CONDITION"] = my_submissions_view["COND_AVAILABLE"]
+                        my_submissions_view["SUBMITTED DATE"] = my_submissions_view["SUBMITTED_DATE"]
+
+                        filtered_my_submissions_view = apply_my_submissions_filters(
+                            my_submissions_view,
+                            "worker_my_submissions"
+                        )
+                        display_filtered_my_submissions = filtered_my_submissions_view[display_cols].copy()
+                        st.dataframe(display_filtered_my_submissions, width='stretch')
+                        render_export_button(
+                            "Export My Submissions Excel",
+                            display_filtered_my_submissions,
+                            f"my_submissions_{username}.xlsx"
+                        )
+
+                        submitted_quotes_only = my_quotes[
+                            (my_quotes["NO_QUOTE"] == "NO") &
+                            (my_quotes["EDIT_REQUIRED"] == "NO") &
+                            (~my_quotes["SUPPLIER"].astype(str).str.strip().str.lower().isin(["", "nan", "none"]))
+                        ].copy()
+
+                        if not submitted_quotes_only.empty:
+                            st.divider()
+                            st.subheader("Attach / Update Certificate")
+
+                            attach_option_map = {}
+                            for _, row in submitted_quotes_only.iterrows():
+                                base_label = f"{row['PART NO']} | {row['SUPPLIER']}"
+                                label = make_unique_label(
+                                    base_label,
+                                    [row["QUOTE_ID"]],
+                                    set(attach_option_map.keys())
+                                )
+                                attach_option_map[label] = (
+                                    str(row.get("SUBMISSION_ID", "")).strip(),
+                                    clean_text(row["QUOTE_ID"]),
+                                    clean_text(row["PART NO"]),
+                                    clean_text(row["SUPPLIER"]),
+                                )
+
+                            selected_submission = st.selectbox(
+                                "Select Submission",
+                                list(attach_option_map.keys()),
+                                key="attach_cert_select"
+                            )
+                            cert_type_attach = st.text_input(
+                                "Certificate Type (optional)",
+                                key="attach_cert_type"
+                            )
+                            uploaded_cert_attach = st.file_uploader(
+                                "Upload Certificate (PDF)",
+                                type=["pdf"],
+                                key="attach_cert_uploader"
+                            )
+
+                            if st.button("Upload Certificate", key="attach_cert_btn"):
+                                if uploaded_cert_attach is None:
+                                    st.error("Please select a certificate file to upload.")
+                                else:
+                                    att_sub_id, att_quote_id, att_part_no, att_supplier = attach_option_map[selected_submission]
+
+                                    cert_filename = (
+                                        f"{safe_filename_part(att_quote_id)}_"
+                                        f"{safe_filename_part(att_part_no)}_"
+                                        f"{safe_filename_part(att_supplier)}.pdf"
+                                    )
+                                    cert_path = CERTIFICATE_DIR / cert_filename
+                                    cert_path.write_bytes(uploaded_cert_attach.getbuffer())
+
+                                    wdf = read_csv(WORKER_QUOTES_PATH)
+                                    wdf = enforce_schema(wdf, WORKER_QUOTES_COLUMNS)
+                                    wdf["QUOTE_ID"] = wdf["QUOTE_ID"].astype(str).str.strip()
+                                    wdf["PART NO"] = wdf["PART NO"].astype(str).str.strip()
+                                    wdf["SUPPLIER"] = wdf["SUPPLIER"].fillna("").astype(str).str.strip()
+
+                                    mask = (wdf["SUBMISSION_ID"] == att_sub_id)
+                                    wdf.loc[mask, "CERTIFICATE_FILE"] = cert_filename
+                                    wdf.loc[mask, "CERTIFICATE_AVAILABLE"] = "YES"
+                                    if cert_type_attach.strip():
+                                        wdf.loc[mask, "CERTIFICATE_TYPE"] = cert_type_attach.strip()
+
+                                    wdf.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                                    st.success("Certificate attached successfully.")
+                                    st.rerun()
+
+                with reassigned_subtab:
+                    reassigned_view = merged[
+                        (merged["EDIT_REQUIRED"] == "YES") &
+                        (merged["NO_QUOTE"] != "YES")
+                    ].copy()
+                    if reassigned_view.empty:
+                        st.info("No rows were sent back for correction.")
+                    else:
+                        st.dataframe(
+                            reassigned_view[
+                                [
+                                    "QUOTE_ID",
+                                    "Customer ref NO",
+                                    "PART NO",
+                                    "DESCRIPTION",
+                                    "SUPPLIER",
+                                    "PRICE",
+                                    "COND_AVAILABLE",
+                                    "QTY_AVAILABLE",
+                                    "LT",
+                                    "REMARKS",
+                                ]
+                            ],
+                            width='stretch'
+                        )
+
+                        key_rows = reassigned_view[["SUBMISSION_ID", "QUOTE_ID", "PART NO", "SUPPLIER"]].drop_duplicates()
+                        row_options = list(key_rows.itertuples(index=False, name=None))
+                        selected_key = st.selectbox(
+                            "Select Re-Assigned Row",
+                            row_options,
+                            format_func=lambda x: f"{x[1]} | {x[2]} | {x[3]}",
+                            key="worker_reassigned_select",
+                        )
+
+                        selected_row = reassigned_view[
+                            reassigned_view["SUBMISSION_ID"] == str(selected_key[0]).strip()
+                        ].iloc[-1]
+
+                        current_price = pd.to_numeric(selected_row.get("PRICE", 0), errors="coerce")
+                        if pd.isna(current_price):
+                            current_price = 0.0
+                        current_qty = pd.to_numeric(selected_row.get("QTY_AVAILABLE", 0), errors="coerce")
+                        if pd.isna(current_qty):
+                            current_qty = 0
+                        cond_options = ["NE", "NS", "OH", "SV", "AR", "FN", "MOD","RP","IN"]
+                        current_cond = str(selected_row.get("COND_AVAILABLE", "")).strip()
+                        cond_index = cond_options.index(current_cond) if current_cond in cond_options else 0
+                        current_cert_available = str(selected_row.get("CERTIFICATE_AVAILABLE", "")).strip().upper() == "YES"
+
+                        with st.form("reassigned_update_form"):
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.text_input("QUOTE_ID", value=str(selected_key[1]), disabled=True)
+                                st.text_input("PART NO", value=str(selected_key[2]), disabled=True)
+                                supplier_display = st.text_input("SUPPLIER", value=str(selected_key[3]), disabled=True)
+                                price = st.number_input("PRICE", min_value=0.0, step=0.01, value=float(current_price))
+                                cond_available = st.selectbox("COND AVAILABLE", cond_options, index=cond_index)
+                                qty_available = st.number_input("QTY AVAILABLE", min_value=0, step=1, value=int(current_qty))
+                            with c2:
+                                supplier_country = st.text_input(
+                                    "SUPPLIER COUNTRY",
+                                    value=str(selected_row.get("SUPPLIER_COUNTRY", "")).strip()
+                                )
+                                supplier_source = st.text_input(
+                                    "SUPPLIER SOURCE",
+                                    value=str(selected_row.get("SUPPLIER_SOURCE", "")).strip()
+                                )
+                                lt = st.text_input("LT (Lead Time)", value=str(selected_row.get("LT", "")).strip())
+                                certificate_available = st.toggle("Certificate Available", value=current_cert_available)
+                                certificate_type = st.text_input(
+                                    "Certificate Type",
+                                    value=str(selected_row.get("CERTIFICATE_TYPE", "")).strip(),
+                                    key=f"reassign_cert_type_{selected_key[1]}_{selected_key[2]}_{selected_key[3]}"
+                                )
+                                uploaded_cert = None
+                                if certificate_available:
+                                    uploaded_cert = st.file_uploader(
+                                        "Upload Certificate (PDF only)",
+                                        type=["pdf"],
+                                        key=f"reassign_cert_upload_{selected_key[1]}_{selected_key[2]}_{selected_key[3]}"
+                                    )
+                                remarks = st.text_area(
+                                    "REMARKS",
+                                    value=str(selected_row.get("REMARKS", "")).strip()
+                                )
+
+                            update_submission = st.form_submit_button("Update Submission")
+
+                            if update_submission:
+                                if price <= 0:
+                                    st.error("Price must be greater than zero.")
+                                else:
+                                    cert_file = str(selected_row.get("CERTIFICATE_FILE", "")).strip()
+                                    cert_type_value = certificate_type.strip() if certificate_available else ""
+
+                                    if certificate_available and uploaded_cert is not None:
+                                        cert_filename = (
+                                            f"{safe_filename_part(selected_key[1])}_"
+                                            f"{safe_filename_part(selected_key[2])}_"
+                                            f"{safe_filename_part(supplier_display)}.pdf"
+                                        )
+                                        cert_path = CERTIFICATE_DIR / cert_filename
+                                        cert_path.write_bytes(uploaded_cert.getbuffer())
+                                        cert_file = cert_filename
+                                    elif not certificate_available:
+                                        cert_file = ""
+
+                                    update_df = read_csv(WORKER_QUOTES_PATH)
+                                    update_df = enforce_schema(update_df, WORKER_QUOTES_COLUMNS)
+                                    update_df["QUOTE_ID"] = update_df["QUOTE_ID"].astype(str).str.strip()
+                                    update_df["PART NO"] = update_df["PART NO"].astype(str).str.strip()
+                                    update_df["SUPPLIER"] = update_df["SUPPLIER"].fillna("").astype(str).str.strip()
+
+                                    mask = (update_df["SUBMISSION_ID"] == str(selected_key[0]).strip())
+
+                                    if not mask.any():
+                                        st.error("Submission row not found.")
+                                    else:
+                                        update_df.loc[mask, "SUPPLIER_COUNTRY"] = supplier_country
+                                        update_df.loc[mask, "SUPPLIER_SOURCE"] = supplier_source
+                                        update_df.loc[mask, "PRICE"] = price
+                                        update_df.loc[mask, "COND_AVAILABLE"] = cond_available
+                                        update_df.loc[mask, "QTY_AVAILABLE"] = qty_available
+                                        update_df.loc[mask, "LT"] = lt
+                                        update_df.loc[mask, "REMARKS"] = remarks
+                                        update_df.loc[mask, "CERTIFICATE_AVAILABLE"] = "YES" if certificate_available else "NO"
+                                        update_df.loc[mask, "CERTIFICATE_FILE"] = cert_file
+                                        update_df.loc[mask, "CERTIFICATE_TYPE"] = cert_type_value
+                                        update_df.loc[mask, "SUBMITTED_DATE"] = datetime.now().strftime("%Y-%m-%d")
+                                        update_df.loc[mask, "EDIT_REQUIRED"] = "NO"
+                                        update_df.loc[mask, "NO_QUOTE"] = "NO"
+                                        update_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+
+                                        st.success("Submission updated successfully.")
+                                        st.rerun()
+
+                with no_quote_subtab:
+                    no_quote_view = merged[merged["NO_QUOTE"] == "YES"].copy()
+                    if no_quote_view.empty:
+                        st.info("No parts marked as No Quote.")
+                    else:
+                        if "NO_QUOTE_REMARK" not in no_quote_view.columns:
+                            no_quote_view["NO_QUOTE_REMARK"] = ""
+                        no_quote_display = no_quote_view[
+                            ["Customer ref NO", "PART NO", "DESCRIPTION", "NO_QUOTE_REMARK"]
+                        ].rename(
+                            columns={
+                                "Customer ref NO": "REF NO",
+                                "NO_QUOTE_REMARK": "REMARK",
+                            }
+                        ).copy()
+                        no_quote_display["STATUS"] = "NO QUOTE"
+                        st.dataframe(no_quote_display, width='stretch')
+
+                        no_quote_key_rows = no_quote_view[["SUBMISSION_ID", "QUOTE_ID", "PART NO", "DESCRIPTION"]].drop_duplicates()
+                        no_quote_options = list(no_quote_key_rows.itertuples(index=False, name=None))
+                        selected_no_quote_key = st.selectbox(
+                            "Select No Quote Part",
+                            no_quote_options,
+                            format_func=lambda x: f"{x[2]} | {x[3]} | {x[1]}",
+                            key="no_quote_select_row"
+                        )
+
+                        with st.form("add_supplier_from_no_quote_form"):
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.text_input("QUOTE_ID", value=str(selected_no_quote_key[1]), disabled=True)
+                                st.text_input("PART NO", value=str(selected_no_quote_key[2]), disabled=True)
+                                supplier = st.text_input("SUPPLIER", key="no_quote_supplier")
+                                price = st.number_input("PRICE", min_value=0.0, step=0.01, key="no_quote_price")
+                                cond_available = st.selectbox(
+                                    "COND AVAILABLE",
+                                    ["NE", "NS", "OH", "SV", "AR", "FN", "MOD", "RP", "IN"],
+                                    key="no_quote_cond"
+                                )
+                                qty_available = st.number_input("QTY AVAILABLE", min_value=0, step=1, key="no_quote_qty")
+                            with c2:
+                                supplier_country = st.text_input("SUPPLIER COUNTRY", key="no_quote_country")
+                                supplier_source = st.text_input("SUPPLIER SOURCE", key="no_quote_source")
+                                lt = st.text_input("LT (Lead Time)", key="no_quote_lt")
+                                certificate_available = st.toggle("Certificate Available", key="no_quote_cert_available")
+                                certificate_type = st.text_input("Certificate Type", key="no_quote_cert_type")
+                                uploaded_cert = None
+                                if certificate_available:
+                                    uploaded_cert = st.file_uploader(
+                                        "Upload Certificate (PDF only)",
+                                        type=["pdf"],
+                                        key="no_quote_cert_upload"
+                                    )
+                                remarks = st.text_area("REMARKS", key="no_quote_remarks")
+
+                            add_supplier = st.form_submit_button("Add Supplier Quote")
+
+                            if add_supplier:
+                                supplier = supplier.strip()
+                                if not supplier or price <= 0:
+                                    st.error("Supplier and Price are required.")
+                                elif certificate_available and uploaded_cert is None:
+                                    st.error("Please upload certificate file.")
+                                else:
+                                    selected_sub_id = str(selected_no_quote_key[0]).strip()
+                                    selected_quote_id = str(selected_no_quote_key[1]).strip()
+                                    selected_part_no = str(selected_no_quote_key[2]).strip()
+
+                                    cert_file = ""
+                                    if certificate_available and uploaded_cert is not None:
+                                        cert_file = (
+                                            f"{safe_filename_part(selected_quote_id)}_"
+                                            f"{safe_filename_part(selected_part_no)}_"
+                                            f"{safe_filename_part(supplier)}.pdf"
+                                        )
+                                        cert_path = CERTIFICATE_DIR / cert_file
+                                        cert_path.write_bytes(uploaded_cert.getbuffer())
+
+                                    update_df = read_csv(WORKER_QUOTES_PATH)
+                                    update_df = enforce_schema(update_df, WORKER_QUOTES_COLUMNS)
+                                    update_df["QUOTE_ID"] = update_df["QUOTE_ID"].astype(str).str.strip()
+                                    update_df["PART NO"] = update_df["PART NO"].astype(str).str.strip()
+                                    update_df["SUPPLIER"] = update_df["SUPPLIER"].fillna("").astype(str).str.strip()
+                                    update_df["WORKER_ID"] = update_df["WORKER_ID"].astype(str).str.strip()
+
+                                    no_quote_mask = (update_df["SUBMISSION_ID"] == selected_sub_id) & (update_df["SUPPLIER"] == "")
+                                    supplier_mask = (
+                                        (update_df["QUOTE_ID"] == selected_quote_id) &
+                                        (update_df["PART NO"] == selected_part_no) &
+                                        (update_df["SUPPLIER"] == supplier)
+                                    )
+
+                                    existing_ids = update_df["SUBMISSION_ID"].dropna().astype(str)
+                                    valid_ids = [int(x.replace("SUB", "")) for x in existing_ids if x.startswith("SUB") and x.replace("SUB", "").isdigit()]
+                                    next_id = max(valid_ids) + 1 if valid_ids else 1
+                                    submission_id = f"SUB{next_id:04d}"
+                                    
+                                    row_data = {
+                                        "SUBMISSION_ID": submission_id,
+                                        "QUOTE_ID": selected_quote_id,
+                                        "PART NO": selected_part_no,
+                                        "SUPPLIER": supplier,
+                                        "SUPPLIER_COUNTRY": supplier_country,
+                                        "SUPPLIER_SOURCE": supplier_source,
+                                        "PRICE": price,
+                                        "COND_AVAILABLE": cond_available,
+                                        "QTY_AVAILABLE": qty_available,
+                                        "LT": lt,
+                                        "CERTIFICATE_AVAILABLE": "YES" if certificate_available else "NO",
+                                        "CERTIFICATE_FILE": cert_file,
+                                        "CERTIFICATE_TYPE": certificate_type if certificate_available else "",
+                                        "REMARKS": remarks,
+                                        "WORKER_ID": user_id,
+                                        "SUBMITTED_DATE": datetime.now().strftime("%Y-%m-%d"),
+                                        "EDIT_REQUIRED": "NO",
+                                        "NO_QUOTE": "NO",
+                                        "NO_QUOTE_REMARK": "",
+                                    }
+
+                                    if no_quote_mask.any():
+                                        # Retain original SUBMISSION_ID for overwrites
+                                        row_data["SUBMISSION_ID"] = selected_sub_id
+                                        for col, value in row_data.items():
+                                            update_df.loc[no_quote_mask, col] = value
+                                    elif supplier_mask.any():
+                                        existing_sub_id = update_df.loc[supplier_mask, "SUBMISSION_ID"].values[0]
+                                        if str(existing_sub_id).strip():
+                                            row_data["SUBMISSION_ID"] = existing_sub_id
+                                        for col, value in row_data.items():
+                                            update_df.loc[supplier_mask, col] = value
+                                    else:
+                                        update_df = pd.concat([update_df, pd.DataFrame([row_data])], ignore_index=True)
+                                        update_df = enforce_schema(update_df, WORKER_QUOTES_COLUMNS)
+
+                                    update_df.to_csv(WORKER_QUOTES_PATH, index=False, quoting=csv.QUOTE_ALL)
+                                    status_changed = update_quote_status_if_fully_submitted(selected_quote_id)
+                                    st.success("Supplier quote added successfully.")
+                                    if status_changed:
+                                        st.success("All parts submitted. Quote status updated to SUBMITTED.")
+                                    st.rerun()
+
